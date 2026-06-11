@@ -2,7 +2,15 @@ cmake_minimum_required(VERSION 4.2)
 project(lsmtree)
 
 set(CMAKE_CXX_STANDARD 23)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-add_executable(lsmtree main.cpp
-        src/MemTable.cpp
-        inc/MemTable.h)
+# Engine code lives in a library; tests (and a future CLI) link against it.
+add_library(lsmtree_lib
+        src/MemTable.cpp)
+target_include_directories(lsmtree_lib PUBLIC inc)
+
+enable_testing()
+
+add_executable(memtable_tests tests/memtable_tests.cpp)
+target_link_libraries(memtable_tests PRIVATE lsmtree_lib)
+add_test(NAME memtable_tests COMMAND memtable_tests)

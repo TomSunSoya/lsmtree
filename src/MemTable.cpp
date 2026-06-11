@@ -1,4 +1,4 @@
-#include "../inc/MemTable.h"
+#include "MemTable.h"
 
 void MemTable::put(const std::string& key, const std::string& value)
 {

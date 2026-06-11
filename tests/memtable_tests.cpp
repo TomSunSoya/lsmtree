@@ -2,7 +2,7 @@
 #include <stdexcept>
 #include <string>
 
-#include "inc/MemTable.h"
+#include "MemTable.h"
 
 namespace
 {
