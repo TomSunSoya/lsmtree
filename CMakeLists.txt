@@ -11,6 +11,10 @@ target_include_directories(lsmtree_lib PUBLIC inc)
 
 enable_testing()
 
+find_package(GTest CONFIG REQUIRED)
+
 add_executable(memtable_tests tests/memtable_tests.cpp)
-target_link_libraries(memtable_tests PRIVATE lsmtree_lib)
-add_test(NAME memtable_tests COMMAND memtable_tests)
+target_link_libraries(memtable_tests PRIVATE lsmtree_lib GTest::gtest_main)
+
+include(GoogleTest)
+gtest_discover_tests(memtable_tests)
