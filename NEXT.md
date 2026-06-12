@@ -1,1 +1,1 @@
-把 main.cpp 里的 MemTable 测试拆成单独 test target。
+构造 MemTable 时重放 WAL，把 table 从日志里恢复出来。
