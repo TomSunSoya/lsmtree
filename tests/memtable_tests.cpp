@@ -27,17 +27,22 @@ void expectMissing(const MemTable &table, const std::string &key)
     EXPECT_FALSE(table.get(key, actual)) << "expected key to be missing: " << key;
 }
 
-std::string readFile(const std::filesystem::path &path)
+void readFile(const std::filesystem::path &path, std::string &content)
 {
     std::ifstream in(path, std::ios::binary);
-    EXPECT_TRUE(in.is_open()) << "expected file to exist: " << path;
+    ASSERT_TRUE(in.is_open()) << "expected file to exist: " << path;
 
-    return {std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+    content.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
 }
 
 void expectFileContent(const std::filesystem::path &path, const std::string &expected)
 {
-    EXPECT_EQ(expected, readFile(path)) << "unexpected file content in " << path;
+    std::string actual;
+    readFile(path, actual);
+    if (::testing::Test::HasFatalFailure())
+        return;
+
+    EXPECT_EQ(expected, actual) << "unexpected file content in " << path;
 }
 }
 
@@ -51,23 +56,27 @@ TEST(MemTableTest, ReadWrite)
 
         expectMissing(table, "missing");
 
-        expectPut(table, "k", "12");
-        expectGet(table, "k", "12");
+        ASSERT_NO_FATAL_FAILURE(expectPut(table, "k", "12"));
+        ASSERT_NO_FATAL_FAILURE(expectGet(table, "k", "12"));
 
-        expectPut(table, "k", "123");
-        expectGet(table, "k", "123");
+        ASSERT_NO_FATAL_FAILURE(expectPut(table, "k", "123"));
+        ASSERT_NO_FATAL_FAILURE(expectGet(table, "k", "123"));
 
-        expectPut(table, "", "empty-key");
-        expectGet(table, "", "empty-key");
+        ASSERT_NO_FATAL_FAILURE(expectPut(table, "", "empty-key"));
+        ASSERT_NO_FATAL_FAILURE(expectGet(table, "", "empty-key"));
 
-        expectPut(table, "with spaces", "value with spaces");
-        expectGet(table, "with spaces", "value with spaces");
-
-        for (int i = 0; i < 10; ++i)
-            expectPut(table, "key-" + std::to_string(i), "value-" + std::to_string(i));
+        ASSERT_NO_FATAL_FAILURE(expectPut(table, "with spaces", "value with spaces"));
+        ASSERT_NO_FATAL_FAILURE(expectGet(table, "with spaces", "value with spaces"));
 
         for (int i = 0; i < 10; ++i)
-            expectGet(table, "key-" + std::to_string(i), "value-" + std::to_string(i));
+        {
+            ASSERT_NO_FATAL_FAILURE(expectPut(table, "key-" + std::to_string(i), "value-" + std::to_string(i)));
+        }
+
+        for (int i = 0; i < 10; ++i)
+        {
+            ASSERT_NO_FATAL_FAILURE(expectGet(table, "key-" + std::to_string(i), "value-" + std::to_string(i)));
+        }
 
         expectMissing(table, "key-10");
     }
@@ -84,21 +93,21 @@ TEST(MemTableTest, WALAppendFormat)
         MemTable table(logPath.string());
         std::string expected;
 
-        expectPut(table, "alpha", "one");
+        ASSERT_NO_FATAL_FAILURE(expectPut(table, "alpha", "one"));
         expected += "5,alpha=3,one\n";
-        expectFileContent(logPath, expected);
+        ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, expected));
 
-        expectPut(table, "beta", "two");
+        ASSERT_NO_FATAL_FAILURE(expectPut(table, "beta", "two"));
         expected += "4,beta=3,two\n";
-        expectFileContent(logPath, expected);
+        ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, expected));
 
-        expectPut(table, "a,b=c", "v=1,ok");
+        ASSERT_NO_FATAL_FAILURE(expectPut(table, "a,b=c", "v=1,ok"));
         expected += "5,a,b=c=6,v=1,ok\n";
-        expectFileContent(logPath, expected);
+        ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, expected));
 
-        expectPut(table, "a", "vvv\n\n\rvvv");
+        ASSERT_NO_FATAL_FAILURE(expectPut(table, "a", "vvv\n\n\rvvv"));
         expected += "1,a=9,vvv\n\n\rvvv\n";
-        expectFileContent(logPath, expected);
+        ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, expected));
     }
 
     std::filesystem::remove(logPath);
@@ -117,10 +126,10 @@ TEST(MemTableTest, WALAppendsToExistingLog)
 
     {
         MemTable table(logPath.string());
-        expectPut(table, "next", "record");
+        ASSERT_NO_FATAL_FAILURE(expectPut(table, "next", "record"));
     }
 
-    expectFileContent(logPath, "4,seed=5,value\n4,next=6,record\n");
+    ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, "4,seed=5,value\n4,next=6,record\n"));
 
     std::filesystem::remove(logPath);
 }
@@ -133,10 +142,10 @@ TEST(MemTableTest, WALCreatesParentDirectories)
 
     {
         MemTable table(logPath.string());
-        expectPut(table, "parent", "created");
+        ASSERT_NO_FATAL_FAILURE(expectPut(table, "parent", "created"));
 
         EXPECT_TRUE(std::filesystem::exists(logPath)) << "expected WAL file in nested directory";
-        expectFileContent(logPath, "6,parent=7,created\n");
+        ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, "6,parent=7,created\n"));
     }
 
     std::filesystem::remove_all(root);
@@ -151,20 +160,20 @@ TEST(MemTableTest, WALRecordsEmptyAndMultiDigitLengths)
         MemTable table(logPath.string());
         std::string expected;
 
-        expectPut(table, "empty-value", "");
+        ASSERT_NO_FATAL_FAILURE(expectPut(table, "empty-value", ""));
         expected += "11,empty-value=0,\n";
-        expectFileContent(logPath, expected);
-        expectGet(table, "empty-value", "");
+        ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, expected));
+        ASSERT_NO_FATAL_FAILURE(expectGet(table, "empty-value", ""));
 
-        expectPut(table, "tenletters", "0123456789abc");
+        ASSERT_NO_FATAL_FAILURE(expectPut(table, "tenletters", "0123456789abc"));
         expected += "10,tenletters=13,0123456789abc\n";
-        expectFileContent(logPath, expected);
-        expectGet(table, "tenletters", "0123456789abc");
+        ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, expected));
+        ASSERT_NO_FATAL_FAILURE(expectGet(table, "tenletters", "0123456789abc"));
 
-        expectPut(table, "", "");
+        ASSERT_NO_FATAL_FAILURE(expectPut(table, "", ""));
         expected += "0,=0,\n";
-        expectFileContent(logPath, expected);
-        expectGet(table, "", "");
+        ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, expected));
+        ASSERT_NO_FATAL_FAILURE(expectGet(table, "", ""));
     }
 
     std::filesystem::remove(logPath);
