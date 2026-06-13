@@ -35,6 +35,15 @@ void readFile(const std::filesystem::path &path, std::string &content)
     content.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
 }
 
+void writeFile(const std::filesystem::path &path, const std::string &content)
+{
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    ASSERT_TRUE(out.is_open()) << "expected file to open for writing: " << path;
+
+    out << content;
+    ASSERT_TRUE(out.good()) << "expected file write to succeed: " << path;
+}
+
 void expectFileContent(const std::filesystem::path &path, const std::string &expected)
 {
     std::string actual;
@@ -81,6 +90,101 @@ TEST(MemTableTest, ReadWrite)
         expectMissing(table, "key-10");
     }
 
+    std::filesystem::remove(logPath);
+}
+
+TEST(MemTableTest, WALRestoresExistingRecords)
+{
+    const std::filesystem::path logPath("memtable_tests_restore_existing.wal");
+    std::filesystem::remove(logPath);
+    ASSERT_NO_FATAL_FAILURE(writeFile(logPath, "5,alpha=3,one\n4,beta=3,two\n"));
+
+    {
+        MemTable table(logPath.string());
+
+        ASSERT_NO_FATAL_FAILURE(expectGet(table, "alpha", "one"));
+        ASSERT_NO_FATAL_FAILURE(expectGet(table, "beta", "two"));
+        expectMissing(table, "missing");
+    }
+
+    ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, "5,alpha=3,one\n4,beta=3,two\n"));
+    std::filesystem::remove(logPath);
+}
+
+TEST(MemTableTest, WALReplayKeepsLatestValueForDuplicateKey)
+{
+    const std::filesystem::path logPath("memtable_tests_restore_duplicate.wal");
+    std::filesystem::remove(logPath);
+    ASSERT_NO_FATAL_FAILURE(writeFile(logPath, "1,k=3,old\n1,k=3,new\n"));
+
+    {
+        MemTable table(logPath.string());
+
+        ASSERT_NO_FATAL_FAILURE(expectGet(table, "k", "new"));
+    }
+
+    ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, "1,k=3,old\n1,k=3,new\n"));
+    std::filesystem::remove(logPath);
+}
+
+TEST(MemTableTest, WALTruncatesIncompleteTailDuringRestore)
+{
+    const std::filesystem::path logPath("memtable_tests_restore_truncate_tail.wal");
+    std::filesystem::remove(logPath);
+    ASSERT_NO_FATAL_FAILURE(writeFile(logPath, "5,alpha=3,one\n4,beta=3"));
+
+    {
+        MemTable table(logPath.string());
+
+        ASSERT_NO_FATAL_FAILURE(expectGet(table, "alpha", "one"));
+        expectMissing(table, "beta");
+    }
+
+    ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, "5,alpha=3,one\n"));
+    std::filesystem::remove(logPath);
+}
+
+TEST(MemTableTest, WALCanAppendAfterTruncatingDamagedTailAndRestoreAgain)
+{
+    const std::filesystem::path logPath("memtable_tests_restore_append_after_truncate.wal");
+    std::filesystem::remove(logPath);
+    ASSERT_NO_FATAL_FAILURE(writeFile(logPath, "5,alpha=3,one\n4,beta=3"));
+
+    {
+        MemTable table(logPath.string());
+
+        ASSERT_NO_FATAL_FAILURE(expectGet(table, "alpha", "one"));
+        expectMissing(table, "beta");
+        ASSERT_NO_FATAL_FAILURE(expectPut(table, "gamma", "three"));
+        ASSERT_NO_FATAL_FAILURE(expectGet(table, "gamma", "three"));
+    }
+
+    {
+        MemTable table(logPath.string());
+
+        ASSERT_NO_FATAL_FAILURE(expectGet(table, "alpha", "one"));
+        ASSERT_NO_FATAL_FAILURE(expectGet(table, "gamma", "three"));
+        expectMissing(table, "beta");
+    }
+
+    ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, "5,alpha=3,one\n5,gamma=5,three\n"));
+    std::filesystem::remove(logPath);
+}
+
+TEST(MemTableTest, WALTreatsOverflowLengthAsDamagedTail)
+{
+    const std::filesystem::path logPath("memtable_tests_restore_overflow_length.wal");
+    std::filesystem::remove(logPath);
+    ASSERT_NO_FATAL_FAILURE(writeFile(logPath, "5,alpha=3,one\n99999999999999999999999,bad=1,x\n"));
+
+    {
+        MemTable table(logPath.string());
+
+        ASSERT_NO_FATAL_FAILURE(expectGet(table, "alpha", "one"));
+        expectMissing(table, "bad");
+    }
+
+    ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, "5,alpha=3,one\n"));
     std::filesystem::remove(logPath);
 }
 

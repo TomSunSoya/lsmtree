@@ -1,1 +1,1 @@
-构造 MemTable 时重放 WAL，把 table 从日志里恢复出来。
+MemTable写满之后，flush到SSTable中

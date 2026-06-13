@@ -1,25 +1,28 @@
 #include "MemTable.h"
 
+#include <cerrno>
 #include <cctype>
 #include <filesystem>
+#include <fcntl.h>
 #include <iostream>
-#include <vector>
+#include <sstream>
+#include <stdexcept>
+#include <system_error>
 
-MemTable::MemTable(std::string_view logFilePath) : log_path(logFilePath)
+namespace
 {
-    if (auto dir_path = log_path.parent_path(); !dir_path.empty())
+std::string makeWALRecord(const std::string &key, const std::string &value)
+{
+    return std::to_string(key.size()) + "," + key + "=" + std::to_string(value.size()) + "," + value + "\n";
+}
+}
+
+MemTable::MemTable(std::string_view logFilePath) : log_path(logFilePath), writer(logFilePath)
+{
+    if (!restoreFromWAL())
     {
-        namespace fs = std::filesystem;
-        std::error_code ec;
-        fs::create_directories(dir_path, ec);
-        if (ec)
-        {
-            std::cerr << "Create Directory failed: " << ec.message() << std::endl;
-            throw std::runtime_error("Failed to create directory");
-        }
+        throw std::runtime_error("Failed to restore from wal");
     }
-    out.exceptions(std::ios::failbit | std::ios::badbit);
-    out.open(log_path, std::ios::out | std::ios::app);
 }
 
 bool MemTable::put(const std::string& key, const std::string& value)
@@ -27,10 +30,10 @@ bool MemTable::put(const std::string& key, const std::string& value)
     try
     {
         putToWAL(key, value);
-    } catch (std::ios_base::failure& e)
+    } catch (const std::system_error& e)
     {
         // WAL write failed
-        std::cerr << "putToWAL failed: " << e.what() << std::endl;
+        std::cerr << "putToWAL failed: " << e.code().message() << std::endl;
         return false;
     }
     table[key] = value;
@@ -46,13 +49,88 @@ bool MemTable::get(const std::string_view key, std::string &value) const
     return true;
 }
 
-void MemTable::putToWAL(const std::string& key, const std::string& value)
+MemTable::FileWriter::FileWriter(const std::string_view logPath) : path(logPath), poisoned(false)
 {
-    const std::string line = std::to_string(key.size()) + "," + key + "=" + std::to_string(value.size()) + "," +  value;
-    out << line << std::endl;
+    if (const auto parentPath = path.parent_path(); !parentPath.empty())
+    {
+        namespace fs = std::filesystem;
+        std::error_code ec;
+        fs::create_directories(parentPath, ec);
+        if (ec)
+        {
+            std::cerr << "Create Directory failed: " << ec.message() << std::endl;
+            throw std::runtime_error("Failed to create directory");
+        }
+    }
+
+    fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0664);
+    if (fd < 0)
+        throw std::runtime_error("Failed to open file for writing");
 }
 
-std::vector<std::pair<std::string, std::string>> MemTable::parseWALRecord(std::string_view content)
+void MemTable::FileWriter::write(const std::string &record)
+{
+    if (poisoned)
+        throw std::runtime_error("File is poisoned");
+
+    const ssize_t bytesWritten = ::write(fd, record.c_str(), record.size());
+    if (bytesWritten < 0 || static_cast<size_t>(bytesWritten) != record.size())
+    {
+        poisoned = true;
+        const int err = errno;
+        throw std::system_error(err, std::system_category(), "write failed");
+    }
+
+    if (::fsync(fd))
+    {
+        poisoned = true;
+        const int err = errno;
+        throw std::system_error(err, std::system_category(), "fsync failed");
+    }
+}
+
+int MemTable::FileWriter::truncate(const size_t offset)
+{
+    if (::ftruncate(fd, static_cast<off_t>(offset)) == 0)
+        return 0;
+
+    return errno;
+}
+
+void MemTable::putToWAL(const std::string& key, const std::string& value)
+{
+    writer.write(makeWALRecord(key, value));
+}
+
+bool MemTable::restoreFromWAL()
+{
+    std::ifstream input(log_path);
+    if (!input)
+    {
+        return false;
+    }
+
+    std::stringstream contentBuffer;
+    contentBuffer << input.rdbuf();
+
+    const std::string content(contentBuffer.str());
+    size_t lastGoodOffset = 0;
+    for (const auto walInfo = parseWALRecord(content, lastGoodOffset); const auto &[key, value] : walInfo)
+        table[key] = value;
+
+    if (lastGoodOffset == content.size())
+        return true;
+
+    if (const int err = writer.truncate(lastGoodOffset); err != 0)
+    {
+        std::cerr << "truncate error: " << std::generic_category().message(err) << std::endl;
+        return false;
+    }
+
+    return true;
+}
+
+std::vector<std::pair<std::string, std::string>> MemTable::parseWALRecord(std::string_view content, size_t &lastGoodOffset)
 {
     std::vector<std::pair<std::string, std::string>> records;
     size_t pos = 0;
@@ -66,7 +144,13 @@ std::vector<std::pair<std::string, std::string>> MemTable::parseWALRecord(std::s
         if (begin == pos || pos == content.size())
             return false;
 
-        length = std::stoi(std::string(content.substr(begin, pos - begin)));
+        try
+        {
+            length = std::stoull(std::string(content.substr(begin, pos - begin)));
+        } catch (const std::out_of_range&)
+        {
+            return false;
+        }
         return true;
     };
 
@@ -91,17 +175,17 @@ std::vector<std::pair<std::string, std::string>> MemTable::parseWALRecord(std::s
 
     while (pos < content.size())
     {
-        size_t keyLen = 0;
+        lastGoodOffset = pos;
         std::string_view key;
-        if (!readLength(keyLen) || !consume(',') || !readField(keyLen, key) || !consume('='))
+        if (size_t keyLen = 0; !readLength(keyLen) || !consume(',') || !readField(keyLen, key) || !consume('='))
             return records;
 
-        size_t valueLen = 0;
         std::string_view value;
-        if (!readLength(valueLen) || !consume(',') || !readField(valueLen, value) || !consume('\n'))
+        if (size_t valueLen = 0; !readLength(valueLen) || !consume(',') || !readField(valueLen, value) || !consume('\n'))
             return records;
 
         records.emplace_back(key, value);
     }
+    lastGoodOffset = pos;
     return records;
 }
