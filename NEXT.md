@@ -1,1 +1,1 @@
-SSTable::build 先写临时文件并 fsync 数据,rename 到目标路径后 fsync 父目录;崩溃恢复时清理遗留的 .tmp 文件
+MemTable 累加 (key + value) 字节数并暴露 size_bytes()，作为后续 flush 触发的字节阈值依据。

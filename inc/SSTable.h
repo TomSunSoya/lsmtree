@@ -6,6 +6,7 @@ class SSTable
 {
 public:
     static void build(const MemTable &mt, const std::filesystem::path& path);
+    static void cleanupOrphanedTemps(const std::filesystem::path& dir);
 
     explicit SSTable(std::filesystem::path path);
 

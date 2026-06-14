@@ -73,8 +73,7 @@ void MemTable::FileWriter::write(const std::string &record)
     if (poisoned)
         throw std::runtime_error("File is poisoned");
 
-    const ssize_t bytesWritten = ::write(fd, record.c_str(), record.size());
-    if (bytesWritten < 0 || static_cast<size_t>(bytesWritten) != record.size())
+    if (const ssize_t bytesWritten = ::write(fd, record.c_str(), record.size()); bytesWritten < 0 || static_cast<size_t>(bytesWritten) != record.size())
     {
         poisoned = true;
         const int err = errno;
