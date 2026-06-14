@@ -17,6 +17,10 @@ public:
     bool put(const std::string &key, const std::string &value);
     bool get(std::string_view key, std::string &value) const;
 
+    using const_iterator = std::map<std::string, std::string, std::less<>>::const_iterator;
+    [[nodiscard]] const_iterator begin() const noexcept { return table.begin(); }
+    [[nodiscard]] const_iterator end() const noexcept { return table.end(); }
+
 private:
     struct FileWriter
     {

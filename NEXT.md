@@ -1,1 +1,1 @@
-MemTable写满之后，flush到SSTable中
+SSTable::build 先写临时文件并 fsync 数据,rename 到目标路径后 fsync 父目录;崩溃恢复时清理遗留的 .tmp 文件
