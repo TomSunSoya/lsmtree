@@ -1,2 +1,1 @@
-DB::flush() —— 把 active MemTable 构建成一个唯一命名的 SSTable，换上空的新 MemTable；
-DB::get 在 active MemTable 未命中时回落查已 flush 的 SSTable。先做显式 flush()，暂不接 put 里的阈值自动触发。
+DB 构造时清理崩溃残留：用 SSTable::cleanupOrphanedTemps 清 sstable/ 下的 .tmp；删除 wal/ 下编号小于 active WAL 的旧 WAL 文件（其数据已落在对应 sstable 中）。附测试。

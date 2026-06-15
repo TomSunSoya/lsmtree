@@ -12,12 +12,15 @@ public:
 
     bool put(const std::string &key, const std::string &value);
     bool get(std::string_view key, std::string &value) const;
+    void flush();
 
 private:
     std::unique_ptr<MemTable> actMemTable;
     std::filesystem::path data_dir;
     std::filesystem::path walFilePath;
-    std::filesystem::path ssTablePath;
+    uint64_t currentFileNumber = 0;
+
+    bool searchFromSSTable(std::string_view key, std::string& value) const;
 };
 
 

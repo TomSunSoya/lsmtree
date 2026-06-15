@@ -65,7 +65,7 @@ TEST(DBTest, ConstructorCreatesDataDirectoryAndWalFile)
 
         EXPECT_TRUE(std::filesystem::is_directory(root));
         EXPECT_TRUE(std::filesystem::is_directory(root / "wal"));
-        EXPECT_TRUE(std::filesystem::is_regular_file(root / "wal" / "wal1.wal"));
+        EXPECT_TRUE(std::filesystem::is_regular_file(root / "wal" / "wal_0.wal"));
     }
 
     std::filesystem::remove_all(root);
@@ -161,10 +161,32 @@ TEST(DBTest, ReopensFromWal)
     std::filesystem::remove_all(root);
 }
 
+TEST(DBTest, ReopensFromWalWhenEmptySSTableDirectoryExists)
+{
+    const std::filesystem::path root("db_tests_reopen_wal_with_empty_sstable_dir");
+    std::filesystem::remove_all(root);
+
+    {
+        DB db(root);
+
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "alpha", "one"));
+    }
+
+    ASSERT_TRUE(std::filesystem::create_directories(root / "sstable"));
+
+    {
+        const DB db(root);
+
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "alpha", "one"));
+    }
+
+    std::filesystem::remove_all(root);
+}
+
 TEST(DBTest, WritesToExpectedWalPath)
 {
     const std::filesystem::path root("db_tests_wal_path");
-    const std::filesystem::path walPath = root / "wal" / "wal1.wal";
+    const std::filesystem::path walPath = root / "wal" / "wal_0.wal";
     std::filesystem::remove_all(root);
 
     {
@@ -175,6 +197,164 @@ TEST(DBTest, WritesToExpectedWalPath)
     }
 
     ASSERT_NO_FATAL_FAILURE(expectFileContent(walPath, "5,alpha=3,one\n4,beta=3,two\n"));
+
+    std::filesystem::remove_all(root);
+}
+
+TEST(DBTest, FlushPublishesSSTableAndRotatesWal)
+{
+    const std::filesystem::path root("db_tests_flush_rotates_wal");
+    const std::filesystem::path oldWalPath = root / "wal" / "wal_0.wal";
+    const std::filesystem::path newWalPath = root / "wal" / "wal_1.wal";
+    const std::filesystem::path sstablePath = root / "sstable" / "sst_0.sst";
+    std::filesystem::remove_all(root);
+
+    {
+        DB db(root);
+
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "alpha", "one"));
+        ASSERT_TRUE(std::filesystem::exists(oldWalPath));
+
+        ASSERT_NO_THROW(db.flush());
+
+        EXPECT_TRUE(std::filesystem::is_regular_file(sstablePath));
+        EXPECT_FALSE(std::filesystem::exists(oldWalPath));
+        EXPECT_TRUE(std::filesystem::is_regular_file(newWalPath));
+    }
+
+    std::filesystem::remove_all(root);
+}
+
+TEST(DBTest, GetFallsBackToFlushedSSTable)
+{
+    const std::filesystem::path root("db_tests_get_from_sstable");
+    std::filesystem::remove_all(root);
+
+    {
+        DB db(root);
+
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "alpha", "one"));
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "beta", "two"));
+        ASSERT_NO_THROW(db.flush());
+
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "alpha", "one"));
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "beta", "two"));
+        expectMissing(db, "gamma");
+    }
+
+    std::filesystem::remove_all(root);
+}
+
+TEST(DBTest, ActiveMemTableOverridesFlushedSSTable)
+{
+    const std::filesystem::path root("db_tests_active_overrides_sstable");
+    std::filesystem::remove_all(root);
+
+    {
+        DB db(root);
+
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "key", "old"));
+        ASSERT_NO_THROW(db.flush());
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "key", "new"));
+
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "key", "new"));
+    }
+
+    std::filesystem::remove_all(root);
+}
+
+TEST(DBTest, NewActiveMemTableWritesToNextWalAfterFlush)
+{
+    const std::filesystem::path root("db_tests_next_wal_after_flush");
+    const std::filesystem::path oldWalPath = root / "wal" / "wal_0.wal";
+    const std::filesystem::path newWalPath = root / "wal" / "wal_1.wal";
+    std::filesystem::remove_all(root);
+
+    {
+        DB db(root);
+
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "alpha", "one"));
+        ASSERT_NO_THROW(db.flush());
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "beta", "two"));
+    }
+
+    EXPECT_FALSE(std::filesystem::exists(oldWalPath));
+    ASSERT_NO_FATAL_FAILURE(expectFileContent(newWalPath, "4,beta=3,two\n"));
+
+    std::filesystem::remove_all(root);
+}
+
+TEST(DBTest, ReopensFromFlushedSSTable)
+{
+    const std::filesystem::path root("db_tests_reopen_from_sstable");
+    std::filesystem::remove_all(root);
+
+    {
+        DB db(root);
+
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "alpha", "one"));
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "beta", "two"));
+        ASSERT_NO_THROW(db.flush());
+    }
+
+    {
+        const DB db(root);
+
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "alpha", "one"));
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "beta", "two"));
+        expectMissing(db, "gamma");
+    }
+
+    std::filesystem::remove_all(root);
+}
+
+TEST(DBTest, ReopenContinuesSSTableNumberAfterExistingFiles)
+{
+    const std::filesystem::path root("db_tests_continue_sstable_number");
+    const std::filesystem::path firstSSTablePath = root / "sstable" / "sst_0.sst";
+    const std::filesystem::path secondSSTablePath = root / "sstable" / "sst_1.sst";
+    const std::filesystem::path nextWalPath = root / "wal" / "wal_2.wal";
+    std::filesystem::remove_all(root);
+
+    {
+        DB db(root);
+
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "alpha", "one"));
+        ASSERT_NO_THROW(db.flush());
+    }
+
+    ASSERT_TRUE(std::filesystem::exists(firstSSTablePath));
+
+    {
+        DB db(root);
+
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "beta", "two"));
+        ASSERT_NO_THROW(db.flush());
+    }
+
+    EXPECT_TRUE(std::filesystem::is_regular_file(firstSSTablePath));
+    EXPECT_TRUE(std::filesystem::is_regular_file(secondSSTablePath));
+    EXPECT_TRUE(std::filesystem::is_regular_file(nextWalPath));
+
+    std::filesystem::remove_all(root);
+}
+
+TEST(DBTest, NewerFlushedSSTableWinsForDuplicateKey)
+{
+    const std::filesystem::path root("db_tests_newer_sstable_wins");
+    std::filesystem::remove_all(root);
+
+    {
+        DB db(root);
+
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "key", "old"));
+        ASSERT_NO_THROW(db.flush());
+
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "key", "new"));
+        ASSERT_NO_THROW(db.flush());
+
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "key", "new"));
+    }
 
     std::filesystem::remove_all(root);
 }
