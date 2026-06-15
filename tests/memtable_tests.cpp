@@ -93,6 +93,79 @@ TEST(MemTableTest, ReadWrite)
     std::filesystem::remove(logPath);
 }
 
+TEST(MemTableTest, SizeBytesStartsAtZero)
+{
+    const std::filesystem::path logPath("memtable_tests_size_empty.wal");
+    std::filesystem::remove(logPath);
+
+    {
+        const MemTable table(logPath.string());
+
+        EXPECT_EQ(0u, table.size_bytes());
+    }
+
+    std::filesystem::remove(logPath);
+}
+
+TEST(MemTableTest, SizeBytesTracksInsertedKeysAndValues)
+{
+    const std::filesystem::path logPath("memtable_tests_size_insert.wal");
+    std::filesystem::remove(logPath);
+
+    {
+        MemTable table(logPath.string());
+
+        ASSERT_NO_FATAL_FAILURE(expectPut(table, "alpha", "one"));
+        EXPECT_EQ(std::string("alpha").size() + std::string("one").size(), table.size_bytes());
+
+        ASSERT_NO_FATAL_FAILURE(expectPut(table, "beta", "two"));
+        EXPECT_EQ(
+            std::string("alpha").size() + std::string("one").size() +
+                std::string("beta").size() + std::string("two").size(),
+            table.size_bytes());
+    }
+
+    std::filesystem::remove(logPath);
+}
+
+TEST(MemTableTest, SizeBytesAdjustsWhenUpdatingExistingKey)
+{
+    const std::filesystem::path logPath("memtable_tests_size_update.wal");
+    std::filesystem::remove(logPath);
+
+    {
+        MemTable table(logPath.string());
+
+        ASSERT_NO_FATAL_FAILURE(expectPut(table, "key", "old"));
+        ASSERT_NO_FATAL_FAILURE(expectPut(table, "key", "new-value"));
+
+        EXPECT_EQ(std::string("key").size() + std::string("new-value").size(), table.size_bytes());
+    }
+
+    std::filesystem::remove(logPath);
+}
+
+TEST(MemTableTest, SizeBytesHandlesEmptyKeysAndValues)
+{
+    const std::filesystem::path logPath("memtable_tests_size_empty_fields.wal");
+    std::filesystem::remove(logPath);
+
+    {
+        MemTable table(logPath.string());
+
+        ASSERT_NO_FATAL_FAILURE(expectPut(table, "", "value"));
+        EXPECT_EQ(std::string("value").size(), table.size_bytes());
+
+        ASSERT_NO_FATAL_FAILURE(expectPut(table, "empty-value", ""));
+        EXPECT_EQ(std::string("value").size() + std::string("empty-value").size(), table.size_bytes());
+
+        ASSERT_NO_FATAL_FAILURE(expectPut(table, "", ""));
+        EXPECT_EQ(std::string("empty-value").size(), table.size_bytes());
+    }
+
+    std::filesystem::remove(logPath);
+}
+
 TEST(MemTableTest, WALRestoresExistingRecords)
 {
     const std::filesystem::path logPath("memtable_tests_restore_existing.wal");

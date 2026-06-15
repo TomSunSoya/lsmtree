@@ -1,7 +1,7 @@
 #include "MemTable.h"
 
 #include <cerrno>
-#include <cctype>
+#include <cassert>
 #include <filesystem>
 #include <fcntl.h>
 #include <iostream>
@@ -17,7 +17,7 @@ std::string makeWALRecord(const std::string &key, const std::string &value)
 }
 }
 
-MemTable::MemTable(std::string_view logFilePath) : log_path(logFilePath), writer(logFilePath)
+MemTable::MemTable(std::string_view logFilePath) : log_path(logFilePath), writer(logFilePath), current_size(0)
 {
     if (!restoreFromWAL())
     {
@@ -36,7 +36,16 @@ bool MemTable::put(const std::string& key, const std::string& value)
         std::cerr << "putToWAL failed: " << e.code().message() << std::endl;
         return false;
     }
+    if (const auto it = table.find(key); it != table.end())
+    {
+        assert(current_size >= it->second.size());
+        current_size -= it->second.size();
+        current_size -= it->first.size();
+    }
+
     table[key] = value;
+    current_size += value.size();
+    current_size += key.size();
     return true;
 }
 
@@ -47,6 +56,11 @@ bool MemTable::get(const std::string_view key, std::string &value) const
         return false;
     value = it->second;
     return true;
+}
+
+size_t MemTable::size_bytes() const
+{
+    return current_size;
 }
 
 MemTable::FileWriter::FileWriter(const std::string_view logPath) : path(logPath), poisoned(false)

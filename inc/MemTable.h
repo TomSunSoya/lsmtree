@@ -21,6 +21,8 @@ public:
     [[nodiscard]] const_iterator begin() const noexcept { return table.begin(); }
     [[nodiscard]] const_iterator end() const noexcept { return table.end(); }
 
+    [[nodiscard]] size_t size_bytes() const;
+
 private:
     struct FileWriter
     {
@@ -41,6 +43,7 @@ private:
     std::map<std::string, std::string, std::less<>> table;
     const std::filesystem::path log_path;
     FileWriter writer;
+    size_t current_size;
 
     void putToWAL(const std::string &key, const std::string &value);
     bool restoreFromWAL();
