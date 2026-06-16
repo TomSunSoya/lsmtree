@@ -1,6 +1,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <string>
 
 #include <gtest/gtest.h>
@@ -9,6 +10,8 @@
 
 namespace
 {
+constexpr uint64_t kManualFlushThreshold = std::numeric_limits<uint64_t>::max();
+
 void expectPut(DB &db, const std::string &key, const std::string &value)
 {
     ASSERT_TRUE(db.put(key, value)) << "expected put to succeed for key: " << key;
@@ -61,7 +64,7 @@ TEST(DBTest, ConstructorCreatesDataDirectoryAndWalFile)
     std::filesystem::remove_all(root);
 
     {
-        const DB db(root);
+        const DB db(root, kManualFlushThreshold);
 
         EXPECT_TRUE(std::filesystem::is_directory(root));
         EXPECT_TRUE(std::filesystem::is_directory(root / "wal"));
@@ -78,7 +81,7 @@ TEST(DBTest, ConstructorRejectsExistingNonDirectoryPath)
     std::filesystem::remove(root);
     ASSERT_NO_FATAL_FAILURE(writeFile(root, "not a directory"));
 
-    EXPECT_THROW(DB db(root), std::invalid_argument);
+    EXPECT_THROW(DB db(root, kManualFlushThreshold), std::invalid_argument);
 
     std::filesystem::remove(root);
 }
@@ -89,7 +92,7 @@ TEST(DBTest, PutAndGetUseActiveMemTable)
     std::filesystem::remove_all(root);
 
     {
-        DB db(root);
+        DB db(root, kManualFlushThreshold);
 
         ASSERT_NO_FATAL_FAILURE(expectPut(db, "alpha", "one"));
         ASSERT_NO_FATAL_FAILURE(expectGet(db, "alpha", "one"));
@@ -108,7 +111,7 @@ TEST(DBTest, PutUpdatesExistingKey)
     std::filesystem::remove_all(root);
 
     {
-        DB db(root);
+        DB db(root, kManualFlushThreshold);
 
         ASSERT_NO_FATAL_FAILURE(expectPut(db, "key", "old"));
         ASSERT_NO_FATAL_FAILURE(expectPut(db, "key", "new"));
@@ -125,7 +128,7 @@ TEST(DBTest, PutAndGetPreserveEmptyKeysAndValues)
     std::filesystem::remove_all(root);
 
     {
-        DB db(root);
+        DB db(root, kManualFlushThreshold);
 
         ASSERT_NO_FATAL_FAILURE(expectPut(db, "", "empty-key"));
         ASSERT_NO_FATAL_FAILURE(expectPut(db, "empty-value", ""));
@@ -144,14 +147,14 @@ TEST(DBTest, ReopensFromWal)
     std::filesystem::remove_all(root);
 
     {
-        DB db(root);
+        DB db(root, kManualFlushThreshold);
 
         ASSERT_NO_FATAL_FAILURE(expectPut(db, "alpha", "one"));
         ASSERT_NO_FATAL_FAILURE(expectPut(db, "beta", "two"));
     }
 
     {
-        const DB db(root);
+        const DB db(root, kManualFlushThreshold);
 
         ASSERT_NO_FATAL_FAILURE(expectGet(db, "alpha", "one"));
         ASSERT_NO_FATAL_FAILURE(expectGet(db, "beta", "two"));
@@ -167,7 +170,7 @@ TEST(DBTest, ReopensFromWalWhenEmptySSTableDirectoryExists)
     std::filesystem::remove_all(root);
 
     {
-        DB db(root);
+        DB db(root, kManualFlushThreshold);
 
         ASSERT_NO_FATAL_FAILURE(expectPut(db, "alpha", "one"));
     }
@@ -175,7 +178,7 @@ TEST(DBTest, ReopensFromWalWhenEmptySSTableDirectoryExists)
     ASSERT_TRUE(std::filesystem::create_directories(root / "sstable"));
 
     {
-        const DB db(root);
+        const DB db(root, kManualFlushThreshold);
 
         ASSERT_NO_FATAL_FAILURE(expectGet(db, "alpha", "one"));
     }
@@ -190,13 +193,69 @@ TEST(DBTest, WritesToExpectedWalPath)
     std::filesystem::remove_all(root);
 
     {
-        DB db(root);
+        DB db(root, kManualFlushThreshold);
 
         ASSERT_NO_FATAL_FAILURE(expectPut(db, "alpha", "one"));
         ASSERT_NO_FATAL_FAILURE(expectPut(db, "beta", "two"));
     }
 
     ASSERT_NO_FATAL_FAILURE(expectFileContent(walPath, "5,alpha=3,one\n4,beta=3,two\n"));
+
+    std::filesystem::remove_all(root);
+}
+
+TEST(DBTest, PutDoesNotAutoFlushWhenMemTableSizeEqualsThreshold)
+{
+    const std::filesystem::path root("db_tests_auto_flush_equal_threshold");
+    const std::filesystem::path walPath = root / "wal" / "wal_0.wal";
+    const std::filesystem::path sstablePath = root / "sstable" / "sst_0.sst";
+    constexpr uint64_t threshold = 8;
+    std::filesystem::remove_all(root);
+
+    {
+        DB db(root, threshold);
+
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "alpha", "one"));
+
+        EXPECT_FALSE(std::filesystem::exists(sstablePath));
+        EXPECT_TRUE(std::filesystem::is_regular_file(walPath));
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "alpha", "one"));
+    }
+
+    ASSERT_NO_FATAL_FAILURE(expectFileContent(walPath, "5,alpha=3,one\n"));
+
+    std::filesystem::remove_all(root);
+}
+
+TEST(DBTest, PutAutoFlushesWhenMemTableSizeExceedsThreshold)
+{
+    const std::filesystem::path root("db_tests_auto_flush_exceeds_threshold");
+    const std::filesystem::path oldWalPath = root / "wal" / "wal_0.wal";
+    const std::filesystem::path newWalPath = root / "wal" / "wal_1.wal";
+    const std::filesystem::path sstablePath = root / "sstable" / "sst_0.sst";
+    constexpr uint64_t threshold = 6;
+    std::filesystem::remove_all(root);
+
+    {
+        DB db(root, threshold);
+
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "a", "12"));
+        EXPECT_FALSE(std::filesystem::exists(sstablePath));
+        EXPECT_TRUE(std::filesystem::is_regular_file(oldWalPath));
+
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "bc", "345"));
+
+        EXPECT_TRUE(std::filesystem::is_regular_file(sstablePath));
+        EXPECT_FALSE(std::filesystem::exists(oldWalPath));
+        EXPECT_TRUE(std::filesystem::is_regular_file(newWalPath));
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "a", "12"));
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "bc", "345"));
+
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "d", "4"));
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "d", "4"));
+    }
+
+    ASSERT_NO_FATAL_FAILURE(expectFileContent(newWalPath, "1,d=1,4\n"));
 
     std::filesystem::remove_all(root);
 }
@@ -210,7 +269,7 @@ TEST(DBTest, FlushPublishesSSTableAndRotatesWal)
     std::filesystem::remove_all(root);
 
     {
-        DB db(root);
+        DB db(root, kManualFlushThreshold);
 
         ASSERT_NO_FATAL_FAILURE(expectPut(db, "alpha", "one"));
         ASSERT_TRUE(std::filesystem::exists(oldWalPath));
@@ -231,7 +290,7 @@ TEST(DBTest, GetFallsBackToFlushedSSTable)
     std::filesystem::remove_all(root);
 
     {
-        DB db(root);
+        DB db(root, kManualFlushThreshold);
 
         ASSERT_NO_FATAL_FAILURE(expectPut(db, "alpha", "one"));
         ASSERT_NO_FATAL_FAILURE(expectPut(db, "beta", "two"));
@@ -251,7 +310,7 @@ TEST(DBTest, ActiveMemTableOverridesFlushedSSTable)
     std::filesystem::remove_all(root);
 
     {
-        DB db(root);
+        DB db(root, kManualFlushThreshold);
 
         ASSERT_NO_FATAL_FAILURE(expectPut(db, "key", "old"));
         ASSERT_NO_THROW(db.flush());
@@ -271,7 +330,7 @@ TEST(DBTest, NewActiveMemTableWritesToNextWalAfterFlush)
     std::filesystem::remove_all(root);
 
     {
-        DB db(root);
+        DB db(root, kManualFlushThreshold);
 
         ASSERT_NO_FATAL_FAILURE(expectPut(db, "alpha", "one"));
         ASSERT_NO_THROW(db.flush());
@@ -290,7 +349,7 @@ TEST(DBTest, ReopensFromFlushedSSTable)
     std::filesystem::remove_all(root);
 
     {
-        DB db(root);
+        DB db(root, kManualFlushThreshold);
 
         ASSERT_NO_FATAL_FAILURE(expectPut(db, "alpha", "one"));
         ASSERT_NO_FATAL_FAILURE(expectPut(db, "beta", "two"));
@@ -298,7 +357,7 @@ TEST(DBTest, ReopensFromFlushedSSTable)
     }
 
     {
-        const DB db(root);
+        const DB db(root, kManualFlushThreshold);
 
         ASSERT_NO_FATAL_FAILURE(expectGet(db, "alpha", "one"));
         ASSERT_NO_FATAL_FAILURE(expectGet(db, "beta", "two"));
@@ -317,7 +376,7 @@ TEST(DBTest, ReopenContinuesSSTableNumberAfterExistingFiles)
     std::filesystem::remove_all(root);
 
     {
-        DB db(root);
+        DB db(root, kManualFlushThreshold);
 
         ASSERT_NO_FATAL_FAILURE(expectPut(db, "alpha", "one"));
         ASSERT_NO_THROW(db.flush());
@@ -326,7 +385,7 @@ TEST(DBTest, ReopenContinuesSSTableNumberAfterExistingFiles)
     ASSERT_TRUE(std::filesystem::exists(firstSSTablePath));
 
     {
-        DB db(root);
+        DB db(root, kManualFlushThreshold);
 
         ASSERT_NO_FATAL_FAILURE(expectPut(db, "beta", "two"));
         ASSERT_NO_THROW(db.flush());
@@ -347,7 +406,7 @@ TEST(DBTest, ReopenRemovesWalFilesOlderThanCurrentSSTableNumber)
     std::filesystem::remove_all(root);
 
     {
-        DB db(root);
+        DB db(root, kManualFlushThreshold);
 
         ASSERT_NO_FATAL_FAILURE(expectPut(db, "alpha", "one"));
         ASSERT_NO_THROW(db.flush());
@@ -358,7 +417,7 @@ TEST(DBTest, ReopenRemovesWalFilesOlderThanCurrentSSTableNumber)
     ASSERT_NO_FATAL_FAILURE(writeFile(currentWalPath, "4,beta=3,two\n"));
 
     {
-        const DB db(root);
+        const DB db(root, kManualFlushThreshold);
 
         EXPECT_FALSE(std::filesystem::exists(oldWalPath));
         EXPECT_TRUE(std::filesystem::is_regular_file(currentWalPath));
@@ -380,7 +439,7 @@ TEST(DBTest, ReopenKeepsWalFilesThatDoNotMatchOldNumberPattern)
     std::filesystem::remove_all(root);
 
     {
-        DB db(root);
+        DB db(root, kManualFlushThreshold);
 
         ASSERT_NO_FATAL_FAILURE(expectPut(db, "alpha", "one"));
         ASSERT_NO_THROW(db.flush());
@@ -392,7 +451,7 @@ TEST(DBTest, ReopenKeepsWalFilesThatDoNotMatchOldNumberPattern)
     ASSERT_NO_FATAL_FAILURE(writeFile(futureWalPath, "kept"));
 
     {
-        const DB db(root);
+        const DB db(root, kManualFlushThreshold);
 
         EXPECT_FALSE(std::filesystem::exists(staleWalPath));
         EXPECT_TRUE(std::filesystem::is_regular_file(malformedWalPath));
@@ -416,7 +475,7 @@ TEST(DBTest, ConstructorRemovesOrphanedSSTableTemporaryFiles)
     ASSERT_NO_FATAL_FAILURE(writeFile(unrelatedPath, "kept"));
 
     {
-        const DB db(root);
+        const DB db(root, kManualFlushThreshold);
 
         EXPECT_FALSE(std::filesystem::exists(tempPath));
         EXPECT_TRUE(std::filesystem::is_regular_file(unrelatedPath));
@@ -432,7 +491,7 @@ TEST(DBTest, NewerFlushedSSTableWinsForDuplicateKey)
     std::filesystem::remove_all(root);
 
     {
-        DB db(root);
+        DB db(root, kManualFlushThreshold);
 
         ASSERT_NO_FATAL_FAILURE(expectPut(db, "key", "old"));
         ASSERT_NO_THROW(db.flush());

@@ -1,6 +1,9 @@
 #include "DB.h"
 
 #include <format>
+#include <iostream>
+
+#include "SSTable.h"
 
 namespace
 {
@@ -89,7 +92,7 @@ namespace
     }
 }
 
-DB::DB(const std::filesystem::path& data_dir)
+DB::DB(const std::filesystem::path& data_dir, const uint64_t threshold_) : threshold(threshold_)
 {
     namespace fs = std::filesystem;
     if (!fs::exists(data_dir))
@@ -108,7 +111,18 @@ DB::DB(const std::filesystem::path& data_dir)
 
 bool DB::put(const std::string& key, const std::string& value)
 {
-    return actMemTable->put(key, value);
+    if (!actMemTable->put(key, value))
+        return false;
+
+    try
+    {
+        if (actMemTable->size_bytes() > threshold)
+            flush();
+    } catch (const std::exception &e)
+    {
+        std::cerr << e.what() << std::endl;
+    }
+    return true;
 }
 
 bool DB::get(std::string_view key, std::string& value) const
@@ -127,16 +141,16 @@ void DB::flush()
 
     SSTable::build(*actMemTable, ssTablePath);
 
-    actMemTable.reset();
+    const auto oldWalFilePath = walFilePath;
+    const auto newWalFilePath = data_dir / "wal" / std::format("wal_{}.wal", currentFileNumber);
+    actMemTable = std::make_unique<MemTable>(newWalFilePath.string());
+    walFilePath = newWalFilePath;
 
-    if (::remove(walFilePath.c_str()))
+    if (::remove(oldWalFilePath.c_str()))
     {
         const int err = errno;
         throw std::system_error(err, std::system_category(), "remove wal file failed");
     }
-
-    walFilePath = data_dir / "wal" / std::format("wal_{}.wal", currentFileNumber);
-    actMemTable = std::make_unique<MemTable>(walFilePath.string());
 }
 
 bool DB::searchFromSSTable(std::string_view key, std::string& value) const
