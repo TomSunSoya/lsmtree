@@ -339,6 +339,93 @@ TEST(DBTest, ReopenContinuesSSTableNumberAfterExistingFiles)
     std::filesystem::remove_all(root);
 }
 
+TEST(DBTest, ReopenRemovesWalFilesOlderThanCurrentSSTableNumber)
+{
+    const std::filesystem::path root("db_tests_cleanup_old_wal");
+    const std::filesystem::path oldWalPath = root / "wal" / "wal_0.wal";
+    const std::filesystem::path currentWalPath = root / "wal" / "wal_1.wal";
+    std::filesystem::remove_all(root);
+
+    {
+        DB db(root);
+
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "alpha", "one"));
+        ASSERT_NO_THROW(db.flush());
+    }
+
+    ASSERT_TRUE(std::filesystem::exists(root / "sstable" / "sst_0.sst"));
+    ASSERT_NO_FATAL_FAILURE(writeFile(oldWalPath, "5,stale=7,ignored\n"));
+    ASSERT_NO_FATAL_FAILURE(writeFile(currentWalPath, "4,beta=3,two\n"));
+
+    {
+        const DB db(root);
+
+        EXPECT_FALSE(std::filesystem::exists(oldWalPath));
+        EXPECT_TRUE(std::filesystem::is_regular_file(currentWalPath));
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "alpha", "one"));
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "beta", "two"));
+        expectMissing(db, "stale");
+    }
+
+    std::filesystem::remove_all(root);
+}
+
+TEST(DBTest, ReopenKeepsWalFilesThatDoNotMatchOldNumberPattern)
+{
+    const std::filesystem::path root("db_tests_cleanup_wal_keeps_unrelated");
+    const std::filesystem::path staleWalPath = root / "wal" / "wal_0.wal";
+    const std::filesystem::path malformedWalPath = root / "wal" / "wal_old.wal";
+    const std::filesystem::path wrongSuffixPath = root / "wal" / "wal_0.txt";
+    const std::filesystem::path futureWalPath = root / "wal" / "wal_2.wal";
+    std::filesystem::remove_all(root);
+
+    {
+        DB db(root);
+
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "alpha", "one"));
+        ASSERT_NO_THROW(db.flush());
+    }
+
+    ASSERT_NO_FATAL_FAILURE(writeFile(staleWalPath, "5,stale=7,ignored\n"));
+    ASSERT_NO_FATAL_FAILURE(writeFile(malformedWalPath, "kept"));
+    ASSERT_NO_FATAL_FAILURE(writeFile(wrongSuffixPath, "kept"));
+    ASSERT_NO_FATAL_FAILURE(writeFile(futureWalPath, "kept"));
+
+    {
+        const DB db(root);
+
+        EXPECT_FALSE(std::filesystem::exists(staleWalPath));
+        EXPECT_TRUE(std::filesystem::is_regular_file(malformedWalPath));
+        EXPECT_TRUE(std::filesystem::is_regular_file(wrongSuffixPath));
+        EXPECT_TRUE(std::filesystem::is_regular_file(futureWalPath));
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "alpha", "one"));
+    }
+
+    std::filesystem::remove_all(root);
+}
+
+TEST(DBTest, ConstructorRemovesOrphanedSSTableTemporaryFiles)
+{
+    const std::filesystem::path root("db_tests_cleanup_sstable_tmp");
+    const std::filesystem::path sstableDir = root / "sstable";
+    const std::filesystem::path tempPath = sstableDir / "sst_0.sst.tmp";
+    const std::filesystem::path unrelatedPath = sstableDir / "notes.txt";
+    std::filesystem::remove_all(root);
+    ASSERT_TRUE(std::filesystem::create_directories(sstableDir));
+    ASSERT_NO_FATAL_FAILURE(writeFile(tempPath, "partial sstable bytes"));
+    ASSERT_NO_FATAL_FAILURE(writeFile(unrelatedPath, "kept"));
+
+    {
+        const DB db(root);
+
+        EXPECT_FALSE(std::filesystem::exists(tempPath));
+        EXPECT_TRUE(std::filesystem::is_regular_file(unrelatedPath));
+        EXPECT_TRUE(std::filesystem::is_regular_file(root / "wal" / "wal_0.wal"));
+    }
+
+    std::filesystem::remove_all(root);
+}
+
 TEST(DBTest, NewerFlushedSSTableWinsForDuplicateKey)
 {
     const std::filesystem::path root("db_tests_newer_sstable_wins");

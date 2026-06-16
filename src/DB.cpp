@@ -4,40 +4,38 @@
 
 namespace
 {
+    std::optional<uint64_t> parseNumberedFile(
+        const std::string_view filename,
+        const std::string_view prefix,
+        const std::string_view suffix)
+    {
+        if (filename.size() <= prefix.size() + suffix.size())
+            return std::nullopt;
+        if (!filename.starts_with(prefix))
+            return std::nullopt;
+        if (!filename.ends_with(suffix))
+            return std::nullopt;
+
+        const std::string numberStr{filename.substr(prefix.size(), filename.size() - prefix.size() - suffix.size())};
+        try
+        {
+            size_t pos = 0;
+            const auto value = std::stoull(numberStr, &pos, 10);
+            if (pos != numberStr.size())
+                return std::nullopt;
+
+            return value;
+        } catch (const std::exception &)
+        {
+            return std::nullopt;
+        }
+    }
+
     uint64_t maxFileByName(const std::filesystem::path &path)
     {
         namespace fs = std::filesystem;
         if (!fs::exists(path) || !fs::is_directory(path))
             return 0;
-
-        const auto parseSSTableNumber = [] (const std::string &filename) -> std::optional<uint64_t>
-        {
-            constexpr std::string_view prefix = "sst_";
-            constexpr std::string_view suffix = ".sst";
-
-            if (filename.size() <= prefix.size() + suffix.size())
-                return std::nullopt;
-            if (!filename.starts_with(prefix))
-                return std::nullopt;
-            if (!filename.ends_with(suffix))
-                return std::nullopt;
-
-            std::string numberStr{filename.substr(prefix.size(), filename.size() - prefix.size() - suffix.size())};
-
-            try
-            {
-                size_t pos = 0;
-                auto value = std::stoull(numberStr, &pos, 10);
-
-                if (pos != numberStr.size())
-                    return std::nullopt;
-
-                return static_cast<uint64_t>(value);
-            } catch (const std::exception &)
-            {
-                return std::nullopt;
-            }
-        };
 
         std::error_code ec;
         std::optional<uint64_t> currentFileNumber = std::nullopt;
@@ -50,7 +48,7 @@ namespace
                 continue;
             }
 
-            auto number = parseSSTableNumber(entry.path().filename());
+            auto number = parseNumberedFile(entry.path().filename().string(), "sst_", ".sst");
             if (!number)
                 continue;
             if (!currentFileNumber || *currentFileNumber < *number)
@@ -59,6 +57,35 @@ namespace
         if (currentFileNumber)
             ++*currentFileNumber;
         return currentFileNumber ? *currentFileNumber : 0;
+    }
+    void cleanupOrphanedWAL(const std::filesystem::path& dir, const uint64_t currentFileNumber)
+    {
+        namespace fs = std::filesystem;
+        if (!fs::exists(dir) || !fs::is_directory(dir))
+            return;
+
+        constexpr std::string_view prefix = "wal_", suffix = ".wal";
+        for (std::error_code ec; const auto &entry : fs::directory_iterator(dir, ec))
+        {
+            if (ec) return;
+            if (!entry.is_regular_file(ec))
+            {
+                ec.clear();
+                continue;
+            }
+
+            const auto number = parseNumberedFile(entry.path().filename().string(), prefix, suffix);
+            if (!number)
+                continue;
+            if (*number < currentFileNumber)
+            {
+                if (::remove(entry.path().c_str()))
+                {
+                    const auto err = errno;
+                    throw std::system_error(err, std::system_category(), "remove wal file failed");
+                }
+            }
+        }
     }
 }
 
@@ -70,10 +97,12 @@ DB::DB(const std::filesystem::path& data_dir)
     else if (!fs::is_directory(data_dir))
         throw std::invalid_argument("Data directory is not a directory!");
 
+    SSTable::cleanupOrphanedTemps(data_dir / "sstable");
     currentFileNumber = maxFileByName(data_dir / "sstable");
 
     this->data_dir = data_dir;
     walFilePath = data_dir / "wal" / std::format("wal_{}.wal", currentFileNumber);
+    cleanupOrphanedWAL(data_dir / "wal", currentFileNumber);
     actMemTable = std::make_unique<MemTable>(walFilePath.string());
 }
 

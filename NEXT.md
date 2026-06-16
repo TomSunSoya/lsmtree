@@ -1,1 +1,1 @@
-DB 构造时清理崩溃残留：用 SSTable::cleanupOrphanedTemps 清 sstable/ 下的 .tmp；删除 wal/ 下编号小于 active WAL 的旧 WAL 文件（其数据已落在对应 sstable 中）。附测试。
+DB::put 写入后检查 active MemTable 的 size_bytes()，超过阈值就触发 flush；阈值先用常量。附测试：连续 put 越过阈值后自动产生 SSTable、active WAL 轮转、数据仍可 get。
