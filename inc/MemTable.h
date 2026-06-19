@@ -9,6 +9,8 @@
 #include <fstream>
 #include <unistd.h>
 
+#include "utils.h"
+
 class MemTable
 {
 public:
@@ -16,8 +18,9 @@ public:
 
     bool put(const std::string &key, const std::string &value);
     bool get(std::string_view key, std::string &value) const;
+    bool remove(const std::string &key);
 
-    using const_iterator = std::map<std::string, std::string, std::less<>>::const_iterator;
+    using const_iterator = std::map<std::string, Entry, std::less<>>::const_iterator;
     [[nodiscard]] const_iterator begin() const noexcept { return table.begin(); }
     [[nodiscard]] const_iterator end() const noexcept { return table.end(); }
 
@@ -40,14 +43,14 @@ private:
         int truncate(size_t offset);
     };
 
-    std::map<std::string, std::string, std::less<>> table;
+    std::map<std::string, Entry, std::less<>> table;
     const std::filesystem::path log_path;
     FileWriter writer;
     size_t current_size;
 
-    void putToWAL(const std::string &key, const std::string &value);
+    void putToWAL(const std::string &key, const std::string &value, const Type type);
     bool restoreFromWAL();
-    static std::vector<std::pair<std::string, std::string>> parseWALRecord(std::string_view content, size_t &lastGoodOffset);
+    static std::vector<std::pair<std::string, Entry>> parseWALRecord(std::string_view content, size_t &lastGoodOffset);
 };
 
 

@@ -11,9 +11,9 @@
 
 namespace
 {
-std::string makeWALRecord(const std::string &key, const std::string &value)
+std::string makeWALRecord(const std::string &key, const std::string &value, const Type valueType)
 {
-    return std::to_string(key.size()) + "," + key + "=" + std::to_string(value.size()) + "," + value + "\n";
+    return (valueType == Type::VALUE ? "P," : "D,") + std::to_string(key.size()) + "," + key + "=" + std::to_string(value.size()) + "," + value + "\n";
 }
 }
 
@@ -29,7 +29,7 @@ bool MemTable::put(const std::string& key, const std::string& value)
 {
     try
     {
-        putToWAL(key, value);
+        putToWAL(key, value, Type::VALUE);
     } catch (const std::system_error& e)
     {
         // WAL write failed
@@ -38,23 +38,52 @@ bool MemTable::put(const std::string& key, const std::string& value)
     }
     if (const auto it = table.find(key); it != table.end())
     {
-        assert(current_size >= it->second.size());
-        current_size -= it->second.size();
+        assert(current_size >= it->second.value.size() + it->first.size() + sizeof(Type));
+        current_size -= it->second.value.size();
         current_size -= it->first.size();
+        current_size -= sizeof(Type);
     }
 
-    table[key] = value;
+    table[key].value = value;
+    table[key].type = Type::VALUE;
     current_size += value.size();
     current_size += key.size();
+    current_size += sizeof(Type);
     return true;
 }
 
 bool MemTable::get(const std::string_view key, std::string &value) const
 {
     const auto it = table.find(key);
-    if (it == table.end())
+    if (it == table.end() || it->second.type == Type::TOMBSTONE)
         return false;
-    value = it->second;
+    value = it->second.value;
+    return true;
+}
+
+bool MemTable::remove(const std::string &key)
+{
+    try
+    {
+        putToWAL(key, "", Type::TOMBSTONE);
+    } catch (const std::system_error& e)
+    {
+        // WAL write failed
+        std::cerr << "putToWAL failed: " << e.code().message() << std::endl;
+        return false;
+    }
+    if (const auto it = table.find(key); it != table.end())
+    {
+        it->second.type = Type::TOMBSTONE;
+        current_size -= it->second.value.size();
+        it->second.value.clear();
+    } else
+    {
+        table[key].type = Type::TOMBSTONE;
+        table[key].value = "";
+        current_size += sizeof(Type);
+        current_size += key.size();
+    }
     return true;
 }
 
@@ -110,9 +139,9 @@ int MemTable::FileWriter::truncate(const size_t offset)
     return errno;
 }
 
-void MemTable::putToWAL(const std::string& key, const std::string& value)
+void MemTable::putToWAL(const std::string& key, const std::string& value, const Type type)
 {
-    writer.write(makeWALRecord(key, value));
+    writer.write(makeWALRecord(key, value, type));
 }
 
 bool MemTable::restoreFromWAL()
@@ -143,9 +172,9 @@ bool MemTable::restoreFromWAL()
     return true;
 }
 
-std::vector<std::pair<std::string, std::string>> MemTable::parseWALRecord(std::string_view content, size_t &lastGoodOffset)
+std::vector<std::pair<std::string, Entry>> MemTable::parseWALRecord(std::string_view content, size_t &lastGoodOffset)
 {
-    std::vector<std::pair<std::string, std::string>> records;
+    std::vector<std::pair<std::string, Entry>> records;
     size_t pos = 0;
 
     auto readLength = [&content, &pos](size_t &length)
@@ -189,6 +218,16 @@ std::vector<std::pair<std::string, std::string>> MemTable::parseWALRecord(std::s
     while (pos < content.size())
     {
         lastGoodOffset = pos;
+
+        std::string_view type;
+        if (!readField(1, type) || !consume(','))
+            return records;
+
+        if (type != "D" && type != "P")
+            return records;
+
+        Type cur_type = type == "P" ? Type::VALUE : Type::TOMBSTONE;
+
         std::string_view key;
         if (size_t keyLen = 0; !readLength(keyLen) || !consume(',') || !readField(keyLen, key) || !consume('='))
             return records;
@@ -197,7 +236,9 @@ std::vector<std::pair<std::string, std::string>> MemTable::parseWALRecord(std::s
         if (size_t valueLen = 0; !readLength(valueLen) || !consume(',') || !readField(valueLen, value) || !consume('\n'))
             return records;
 
-        records.emplace_back(key, value);
+        auto record = std::make_pair<std::string, Entry>(std::string(key), {cur_type, std::string(value)});
+
+        records.emplace_back(record);
     }
     lastGoodOffset = pos;
     return records;

@@ -2,7 +2,6 @@
 
 #include <cerrno>
 #include <cstddef>
-#include <cstdint>
 #include <fstream>
 #include <stdexcept>
 #include <system_error>
@@ -95,16 +94,16 @@ void SSTable::build(const MemTable &mt, const std::filesystem::path &path)
         throw std::runtime_error("Failed to open file for writing!");
 
     FdGuard dataFile(dataFd);
-    for (auto &[key, value] : mt)
+    for (auto &[key, entry] : mt)
     {
         constexpr uint8_t type = 0;
         const uint32_t key_size = key.size();
-        const uint32_t value_size = value.size();
+        const uint32_t value_size = entry.value.size();
         writeAll(dataFile.get(), &type, 1);
         writeAll(dataFile.get(), &key_size, sizeof(key_size));
         writeAll(dataFile.get(), &value_size, sizeof(value_size));
         writeAll(dataFile.get(), key.data(), key_size);
-        writeAll(dataFile.get(), value.data(), value_size);
+        writeAll(dataFile.get(), entry.value.data(), value_size);
     }
 
     if (::fsync(dataFile.get()))

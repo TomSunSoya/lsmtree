@@ -1,1 +1,1 @@
-DB::put 写入后检查 active MemTable 的 size_bytes()，超过阈值就触发 flush；阈值先用常量。附测试：连续 put 越过阈值后自动产生 SSTable、active WAL 轮转、数据仍可 get。
+flush 把 tombstone 写进 SSTable（SSTable::build 用 Entry 的 type，而非写死 PUT）；查找改三态（有值/墓碑/不存在）：MemTable 和 SSTable 各自能报告这三种；DB::get 新→旧逐层查，撞到"有值"或"墓碑"即停（墓碑→返回 not-found），只有"不存在"才往更旧层走；DB 加 remove。附测试：put K → flush → remove K → get K = not-found 且不复活。

@@ -23,7 +23,8 @@ target_link_libraries(memtable_tests PRIVATE lsmtree_lib GTest::gtest_main)
 add_executable(sstable_tests tests/sstable_tests.cpp)
 target_link_libraries(sstable_tests PRIVATE lsmtree_lib GTest::gtest_main)
 
-add_executable(db_tests tests/db_tests.cpp)
+add_executable(db_tests tests/db_tests.cpp
+        inc/utils.h)
 target_link_libraries(db_tests PRIVATE lsmtree_lib GTest::gtest_main)
 
 include(GoogleTest)

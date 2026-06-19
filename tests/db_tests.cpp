@@ -199,7 +199,7 @@ TEST(DBTest, WritesToExpectedWalPath)
         ASSERT_NO_FATAL_FAILURE(expectPut(db, "beta", "two"));
     }
 
-    ASSERT_NO_FATAL_FAILURE(expectFileContent(walPath, "5,alpha=3,one\n4,beta=3,two\n"));
+    ASSERT_NO_FATAL_FAILURE(expectFileContent(walPath, "P,5,alpha=3,one\nP,4,beta=3,two\n"));
 
     std::filesystem::remove_all(root);
 }
@@ -209,7 +209,7 @@ TEST(DBTest, PutDoesNotAutoFlushWhenMemTableSizeEqualsThreshold)
     const std::filesystem::path root("db_tests_auto_flush_equal_threshold");
     const std::filesystem::path walPath = root / "wal" / "wal_0.wal";
     const std::filesystem::path sstablePath = root / "sstable" / "sst_0.sst";
-    constexpr uint64_t threshold = 8;
+    constexpr uint64_t threshold = 9;
     std::filesystem::remove_all(root);
 
     {
@@ -222,7 +222,7 @@ TEST(DBTest, PutDoesNotAutoFlushWhenMemTableSizeEqualsThreshold)
         ASSERT_NO_FATAL_FAILURE(expectGet(db, "alpha", "one"));
     }
 
-    ASSERT_NO_FATAL_FAILURE(expectFileContent(walPath, "5,alpha=3,one\n"));
+    ASSERT_NO_FATAL_FAILURE(expectFileContent(walPath, "P,5,alpha=3,one\n"));
 
     std::filesystem::remove_all(root);
 }
@@ -255,7 +255,7 @@ TEST(DBTest, PutAutoFlushesWhenMemTableSizeExceedsThreshold)
         ASSERT_NO_FATAL_FAILURE(expectGet(db, "d", "4"));
     }
 
-    ASSERT_NO_FATAL_FAILURE(expectFileContent(newWalPath, "1,d=1,4\n"));
+    ASSERT_NO_FATAL_FAILURE(expectFileContent(newWalPath, "P,1,d=1,4\n"));
 
     std::filesystem::remove_all(root);
 }
@@ -338,7 +338,7 @@ TEST(DBTest, NewActiveMemTableWritesToNextWalAfterFlush)
     }
 
     EXPECT_FALSE(std::filesystem::exists(oldWalPath));
-    ASSERT_NO_FATAL_FAILURE(expectFileContent(newWalPath, "4,beta=3,two\n"));
+    ASSERT_NO_FATAL_FAILURE(expectFileContent(newWalPath, "P,4,beta=3,two\n"));
 
     std::filesystem::remove_all(root);
 }
@@ -413,8 +413,8 @@ TEST(DBTest, ReopenRemovesWalFilesOlderThanCurrentSSTableNumber)
     }
 
     ASSERT_TRUE(std::filesystem::exists(root / "sstable" / "sst_0.sst"));
-    ASSERT_NO_FATAL_FAILURE(writeFile(oldWalPath, "5,stale=7,ignored\n"));
-    ASSERT_NO_FATAL_FAILURE(writeFile(currentWalPath, "4,beta=3,two\n"));
+    ASSERT_NO_FATAL_FAILURE(writeFile(oldWalPath, "P,5,stale=7,ignored\n"));
+    ASSERT_NO_FATAL_FAILURE(writeFile(currentWalPath, "P,4,beta=3,two\n"));
 
     {
         const DB db(root, kManualFlushThreshold);
@@ -445,7 +445,7 @@ TEST(DBTest, ReopenKeepsWalFilesThatDoNotMatchOldNumberPattern)
         ASSERT_NO_THROW(db.flush());
     }
 
-    ASSERT_NO_FATAL_FAILURE(writeFile(staleWalPath, "5,stale=7,ignored\n"));
+    ASSERT_NO_FATAL_FAILURE(writeFile(staleWalPath, "P,5,stale=7,ignored\n"));
     ASSERT_NO_FATAL_FAILURE(writeFile(malformedWalPath, "kept"));
     ASSERT_NO_FATAL_FAILURE(writeFile(wrongSuffixPath, "kept"));
     ASSERT_NO_FATAL_FAILURE(writeFile(futureWalPath, "kept"));
