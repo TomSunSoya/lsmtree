@@ -96,10 +96,11 @@ void SSTable::build(const MemTable &mt, const std::filesystem::path &path)
     FdGuard dataFile(dataFd);
     for (auto &[key, entry] : mt)
     {
-        constexpr uint8_t type = 0;
         const uint32_t key_size = key.size();
         const uint32_t value_size = entry.value.size();
-        writeAll(dataFile.get(), &type, 1);
+        auto type = static_cast<uint8_t>(entry.type);
+
+        writeAll(dataFile.get(), &type, sizeof(type));
         writeAll(dataFile.get(), &key_size, sizeof(key_size));
         writeAll(dataFile.get(), &value_size, sizeof(value_size));
         writeAll(dataFile.get(), key.data(), key_size);
@@ -154,36 +155,41 @@ SSTable::SSTable(std::filesystem::path path) : path(std::move(path))
 {
 }
 
-bool SSTable::get(const std::string_view key, std::string &value) const
+Result SSTable::get(const std::string_view key, std::string &value) const
 {
     if (!std::filesystem::exists(path))
-        return false;
+        return Result::ABSENT;
 
     std::ifstream ifs{path, std::ios::binary};
     if (!ifs.is_open())
-        return false;
+        return Result::ABSENT;
 
     char type = 0;
     while (ifs.read(&type, sizeof(char)))
     {
         uint32_t key_size{}, value_size{};
         if (!ifs.read(reinterpret_cast<char *>(&key_size), sizeof(key_size)))
-            return false;
+            return Result::ABSENT;
         if (!ifs.read(reinterpret_cast<char *>(&value_size), sizeof(value_size)))
-            return false;
+            return Result::ABSENT;
 
         std::string cur_key(key_size, 0);
         std::string cur_value(value_size, 0);
 
         if (!ifs.read(cur_key.data(), key_size))
-            return false;
+            return Result::ABSENT;
         if (!ifs.read(cur_value.data(), value_size))
-            return false;
+            return Result::ABSENT;
+
         if (cur_key == key)
         {
-            value = cur_value;
-            return true;
+            if (static_cast<Type>(type) == Type::VALUE)
+            {
+                value = cur_value;
+                return Result::VALUE;
+            }
+            return Result::TOMBSTONE;
         }
     }
-    return false;
+    return Result::ABSENT;
 }

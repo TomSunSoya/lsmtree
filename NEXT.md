@@ -1,1 +1,1 @@
-flush 把 tombstone 写进 SSTable（SSTable::build 用 Entry 的 type，而非写死 PUT）；查找改三态（有值/墓碑/不存在）：MemTable 和 SSTable 各自能报告这三种；DB::get 新→旧逐层查，撞到"有值"或"墓碑"即停（墓碑→返回 not-found），只有"不存在"才往更旧层走；DB 加 remove。附测试：put K → flush → remove K → get K = not-found 且不复活。
+SSTable 归并原语：给定多个 SSTable(按新→旧顺序),归并成一个新 SSTable——同一个 key 只保留最新版本,墓碑暂时保留(先不丢弃)。需先给 SSTable 加"按序遍历全部记录"的能力。做成纯函数:产出新文件,不接 DB、不删旧文件、不碰 manifest。附测试:重叠 key 取最新值、新墓碑盖旧值、不相关 key 全保留。

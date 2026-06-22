@@ -11,6 +11,7 @@ public:
 
     bool put(const std::string &key, const std::string &value);
     bool get(std::string_view key, std::string &value) const;
+    bool remove(const std::string &key);
     void flush();
 
 private:

@@ -52,13 +52,15 @@ bool MemTable::put(const std::string& key, const std::string& value)
     return true;
 }
 
-bool MemTable::get(const std::string_view key, std::string &value) const
+Result MemTable::get(const std::string_view key, std::string &value) const
 {
     const auto it = table.find(key);
-    if (it == table.end() || it->second.type == Type::TOMBSTONE)
-        return false;
+    if (it == table.end())
+        return Result::ABSENT;
+    if (it->second.type == Type::TOMBSTONE)
+        return Result::TOMBSTONE;
     value = it->second.value;
-    return true;
+    return Result::VALUE;
 }
 
 bool MemTable::remove(const std::string &key)

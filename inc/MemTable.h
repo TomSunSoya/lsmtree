@@ -17,7 +17,7 @@ public:
     explicit MemTable(std::string_view logFilePath);
 
     bool put(const std::string &key, const std::string &value);
-    bool get(std::string_view key, std::string &value) const;
+    Result get(std::string_view key, std::string &value) const;
     bool remove(const std::string &key);
 
     using const_iterator = std::map<std::string, Entry, std::less<>>::const_iterator;

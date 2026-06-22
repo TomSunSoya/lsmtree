@@ -10,7 +10,7 @@ public:
 
     explicit SSTable(std::filesystem::path path);
 
-    bool get(std::string_view key, std::string &value) const;
+    Result get(std::string_view key, std::string &value) const;
 
 private:
     std::filesystem::path path;

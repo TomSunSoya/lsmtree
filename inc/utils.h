@@ -13,3 +13,10 @@ struct Entry
     Type type;
     std::string value;
 };
+
+enum class Result
+{
+    VALUE,
+    TOMBSTONE,
+    ABSENT
+};

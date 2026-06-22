@@ -21,14 +21,20 @@ void expectPut(MemTable &table, const std::string &key, const std::string &value
 void expectGet(const SSTable &table, const std::string &key, const std::string &expected)
 {
     std::string actual;
-    ASSERT_TRUE(table.get(key, actual)) << "expected key to exist: " << key;
+    ASSERT_EQ(Result::VALUE, table.get(key, actual)) << "expected key to exist: " << key;
     EXPECT_EQ(expected, actual) << "unexpected value for key: " << key;
 }
 
 void expectMissing(const SSTable &table, const std::string &key)
 {
     std::string actual = "unchanged";
-    EXPECT_FALSE(table.get(key, actual)) << "expected key to be missing: " << key;
+    EXPECT_EQ(Result::ABSENT, table.get(key, actual)) << "expected key to be missing: " << key;
+}
+
+void expectTombstone(const SSTable &table, const std::string &key)
+{
+    std::string actual = "unchanged";
+    EXPECT_EQ(Result::TOMBSTONE, table.get(key, actual)) << "expected tombstone for key: " << key;
 }
 
 void readFile(const std::filesystem::path &path, std::string &content)
@@ -102,6 +108,31 @@ TEST(SSTableTest, BuildAndReadRecordsFromMemTable)
 
     const SSTable sstable(sstablePath);
     ASSERT_NO_FATAL_FAILURE(expectGet(sstable, "alpha", "one"));
+    ASSERT_NO_FATAL_FAILURE(expectGet(sstable, "beta", "two"));
+    expectMissing(sstable, "gamma");
+
+    std::filesystem::remove(sstablePath);
+    std::filesystem::remove(walPath);
+}
+
+TEST(SSTableTest, BuildPersistsTombstoneAndKeepsScanningUnrelatedKeys)
+{
+    const std::filesystem::path walPath("sstable_tests_tombstone.wal");
+    const std::filesystem::path sstablePath("sstable_tests_tombstone.sst");
+    std::filesystem::remove(walPath);
+    std::filesystem::remove(sstablePath);
+
+    {
+        MemTable memTable(walPath.string());
+        ASSERT_NO_FATAL_FAILURE(expectPut(memTable, "alpha", "one"));
+        ASSERT_NO_FATAL_FAILURE(expectPut(memTable, "beta", "two"));
+        ASSERT_TRUE(memTable.remove("alpha"));
+
+        ASSERT_NO_THROW(SSTable::build(memTable, sstablePath));
+    }
+
+    const SSTable sstable(sstablePath);
+    expectTombstone(sstable, "alpha");
     ASSERT_NO_FATAL_FAILURE(expectGet(sstable, "beta", "two"));
     expectMissing(sstable, "gamma");
 

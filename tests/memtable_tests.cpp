@@ -19,7 +19,7 @@ size_t entrySize(const std::string_view key, const std::string_view value)
 void expectGet(const MemTable &table, const std::string &key, const std::string &expected)
 {
     std::string actual;
-    ASSERT_TRUE(table.get(key, actual)) << "expected key to exist: " << key;
+    ASSERT_EQ(Result::VALUE, table.get(key, actual)) << "expected key to exist: " << key;
     EXPECT_EQ(expected, actual) << "unexpected value for key: " << key;
 }
 
@@ -36,7 +36,13 @@ void expectRemove(MemTable &table, const std::string &key)
 void expectMissing(const MemTable &table, const std::string &key)
 {
     std::string actual;
-    EXPECT_FALSE(table.get(key, actual)) << "expected key to be missing: " << key;
+    EXPECT_NE(Result::VALUE, table.get(key, actual)) << "expected key to be missing: " << key;
+}
+
+void expectTombstone(const MemTable &table, const std::string &key)
+{
+    std::string actual = "unchanged";
+    EXPECT_EQ(Result::TOMBSTONE, table.get(key, actual)) << "expected tombstone for key: " << key;
 }
 
 void readFile(const std::filesystem::path &path, std::string &content)
@@ -187,7 +193,7 @@ TEST(MemTableTest, RemoveHidesExistingKeyAndWritesTombstone)
         ASSERT_NO_FATAL_FAILURE(expectGet(table, "alpha", "one"));
 
         ASSERT_NO_FATAL_FAILURE(expectRemove(table, "alpha"));
-        expectMissing(table, "alpha");
+        expectTombstone(table, "alpha");
     }
 
     ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, "P,5,alpha=3,one\nD,5,alpha=0,\n"));
@@ -204,7 +210,7 @@ TEST(MemTableTest, RemoveMissingKeyRecordsTombstoneAndReplaysAsMissing)
 
         expectMissing(table, "ghost");
         ASSERT_NO_FATAL_FAILURE(expectRemove(table, "ghost"));
-        expectMissing(table, "ghost");
+        expectTombstone(table, "ghost");
         EXPECT_EQ(entrySize("ghost", ""), table.size_bytes());
     }
 
@@ -213,7 +219,7 @@ TEST(MemTableTest, RemoveMissingKeyRecordsTombstoneAndReplaysAsMissing)
     {
         MemTable table(logPath.string());
 
-        expectMissing(table, "ghost");
+        expectTombstone(table, "ghost");
     }
 
     std::filesystem::remove(logPath);
@@ -229,7 +235,7 @@ TEST(MemTableTest, PutAfterRemoveRestoresKeyWithNewValue)
 
         ASSERT_NO_FATAL_FAILURE(expectPut(table, "key", "old"));
         ASSERT_NO_FATAL_FAILURE(expectRemove(table, "key"));
-        expectMissing(table, "key");
+        expectTombstone(table, "key");
 
         ASSERT_NO_FATAL_FAILURE(expectPut(table, "key", "new"));
         ASSERT_NO_FATAL_FAILURE(expectGet(table, "key", "new"));
@@ -302,13 +308,13 @@ TEST(MemTableTest, WALReplayKeepsTombstoneForDeletedKey)
 
         ASSERT_NO_FATAL_FAILURE(expectPut(table, "k", "old"));
         ASSERT_NO_FATAL_FAILURE(expectRemove(table, "k"));
-        expectMissing(table, "k");
+        expectTombstone(table, "k");
     }
 
     {
         MemTable table(logPath.string());
 
-        expectMissing(table, "k");
+        expectTombstone(table, "k");
     }
 
     ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, "P,1,k=3,old\nD,1,k=0,\n"));

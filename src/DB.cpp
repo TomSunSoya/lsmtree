@@ -127,9 +127,15 @@ bool DB::put(const std::string& key, const std::string& value)
 
 bool DB::get(std::string_view key, std::string& value) const
 {
-    if (!actMemTable->get(key, value))
+    const auto ret = actMemTable->get(key, value);
+    if (ret == Result::ABSENT)
         return searchFromSSTable(key, value);
-    return true;
+    return ret == Result::VALUE;
+}
+
+bool DB::remove(const std::string &key)
+{
+    return actMemTable->remove(key);
 }
 
 void DB::flush()
@@ -160,8 +166,11 @@ bool DB::searchFromSSTable(std::string_view key, std::string& value) const
     {
         const std::filesystem::path filePath = data_dir / "sstable" / std::format("sst_{}.sst", i);
         SSTable cur_table(filePath);
-        if (cur_table.get(key, value))
+        const auto ret = cur_table.get(key, value);
+        if (ret == Result::VALUE)
             return true;
+        if (ret == Result::TOMBSTONE)
+            return false;
     }
     return false;
 }

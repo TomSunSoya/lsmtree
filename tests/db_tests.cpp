@@ -17,6 +17,11 @@ void expectPut(DB &db, const std::string &key, const std::string &value)
     ASSERT_TRUE(db.put(key, value)) << "expected put to succeed for key: " << key;
 }
 
+void expectRemove(DB &db, const std::string &key)
+{
+    ASSERT_TRUE(db.remove(key)) << "expected remove to succeed for key: " << key;
+}
+
 void expectGet(const DB &db, const std::string &key, const std::string &expected)
 {
     std::string actual;
@@ -164,6 +169,28 @@ TEST(DBTest, ReopensFromWal)
     std::filesystem::remove_all(root);
 }
 
+TEST(DBTest, ReopensFromWalWithDeletedKeyHidden)
+{
+    const std::filesystem::path root("db_tests_reopen_from_wal_with_delete");
+    std::filesystem::remove_all(root);
+
+    {
+        DB db(root, kManualFlushThreshold);
+
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "alpha", "one"));
+        ASSERT_NO_FATAL_FAILURE(expectRemove(db, "alpha"));
+        expectMissing(db, "alpha");
+    }
+
+    {
+        const DB db(root, kManualFlushThreshold);
+
+        expectMissing(db, "alpha");
+    }
+
+    std::filesystem::remove_all(root);
+}
+
 TEST(DBTest, ReopensFromWalWhenEmptySSTableDirectoryExists)
 {
     const std::filesystem::path root("db_tests_reopen_wal_with_empty_sstable_dir");
@@ -200,6 +227,35 @@ TEST(DBTest, WritesToExpectedWalPath)
     }
 
     ASSERT_NO_FATAL_FAILURE(expectFileContent(walPath, "P,5,alpha=3,one\nP,4,beta=3,two\n"));
+
+    std::filesystem::remove_all(root);
+}
+
+TEST(DBTest, FlushedTombstoneHidesOlderSSTableValueButKeepsOtherKeys)
+{
+    const std::filesystem::path root("db_tests_flushed_tombstone");
+    std::filesystem::remove_all(root);
+
+    {
+        DB db(root, kManualFlushThreshold);
+
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "alpha", "one"));
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "beta", "two"));
+        ASSERT_NO_THROW(db.flush());
+
+        ASSERT_NO_FATAL_FAILURE(expectRemove(db, "alpha"));
+        ASSERT_NO_THROW(db.flush());
+
+        expectMissing(db, "alpha");
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "beta", "two"));
+    }
+
+    {
+        const DB db(root, kManualFlushThreshold);
+
+        expectMissing(db, "alpha");
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "beta", "two"));
+    }
 
     std::filesystem::remove_all(root);
 }
