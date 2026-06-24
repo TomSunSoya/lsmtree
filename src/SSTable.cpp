@@ -1,5 +1,6 @@
 #include "SSTable.h"
 
+#include <cassert>
 #include <cerrno>
 #include <cstddef>
 #include <fstream>
@@ -164,32 +165,74 @@ Result SSTable::get(const std::string_view key, std::string &value) const
     if (!ifs.is_open())
         return Result::ABSENT;
 
-    char type = 0;
-    while (ifs.read(&type, sizeof(char)))
+    while (const auto curRecord = readOneRecord(ifs))
     {
+        if (curRecord->key == key)
+        {
+            if (curRecord->type != Type::VALUE)
+                return Result::TOMBSTONE;
+            value = curRecord->value;
+            return Result::VALUE;
+        }
+    }
+    return Result::ABSENT;
+}
+
+std::optional<Record> SSTable::readOneRecord(std::ifstream& ifs)
+{
+    char type = 0;
+    if (ifs.read(&type, sizeof(char)))
+    {
+        Record record{};
         uint32_t key_size{}, value_size{};
         if (!ifs.read(reinterpret_cast<char *>(&key_size), sizeof(key_size)))
-            return Result::ABSENT;
+            return std::nullopt;
         if (!ifs.read(reinterpret_cast<char *>(&value_size), sizeof(value_size)))
-            return Result::ABSENT;
+            return std::nullopt;
 
         std::string cur_key(key_size, 0);
         std::string cur_value(value_size, 0);
 
         if (!ifs.read(cur_key.data(), key_size))
-            return Result::ABSENT;
+            return std::nullopt;
         if (!ifs.read(cur_value.data(), value_size))
-            return Result::ABSENT;
+            return std::nullopt;
 
-        if (cur_key == key)
-        {
-            if (static_cast<Type>(type) == Type::VALUE)
-            {
-                value = cur_value;
-                return Result::VALUE;
-            }
-            return Result::TOMBSTONE;
-        }
+        record.key = cur_key;
+        record.value = cur_value;
+        record.type = static_cast<Type>(type);
+
+        return record;
     }
-    return Result::ABSENT;
+    return std::nullopt;
 }
+
+Cursor::Cursor(std::filesystem::path  path) : path(std::move(path))
+{
+    if (!std::filesystem::exists(this->path))
+        throw std::runtime_error("Invalid path");
+
+    ifs.open(this->path, std::ios::binary);
+    if (!ifs.is_open())
+        throw std::runtime_error("Failed to open SSTable file!");
+
+    currentRecord = SSTable::readOneRecord(ifs);
+}
+
+bool Cursor::valid() const
+{
+    return currentRecord != std::nullopt;
+}
+
+const Record& Cursor::current() const
+{
+    assert(valid());
+    return *currentRecord;
+}
+
+void Cursor::advance()
+{
+    if (valid())
+        currentRecord = SSTable::readOneRecord(ifs);
+}
+

@@ -20,3 +20,10 @@ enum class Result
     TOMBSTONE,
     ABSENT
 };
+
+struct Record
+{
+    std::string key;
+    Type type;
+    std::string value;
+};

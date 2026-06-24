@@ -87,6 +87,13 @@ void expectFileHexDump(const std::filesystem::path &path, const std::string &exp
 
     EXPECT_EQ(expected, hexDump(content)) << "unexpected file bytes in " << path;
 }
+
+void expectRecord(const Record &record, const std::string &key, const Type type, const std::string &value)
+{
+    EXPECT_EQ(key, record.key);
+    EXPECT_EQ(type, record.type);
+    EXPECT_EQ(value, record.value);
+}
 }
 
 TEST(SSTableTest, BuildAndReadRecordsFromMemTable)
@@ -138,6 +145,75 @@ TEST(SSTableTest, BuildPersistsTombstoneAndKeepsScanningUnrelatedKeys)
 
     std::filesystem::remove(sstablePath);
     std::filesystem::remove(walPath);
+}
+
+TEST(SSTableTest, CursorIteratesRecordsInTableOrder)
+{
+    const std::filesystem::path walPath("sstable_tests_cursor_iterate.wal");
+    const std::filesystem::path sstablePath("sstable_tests_cursor_iterate.sst");
+    std::filesystem::remove(walPath);
+    std::filesystem::remove(sstablePath);
+
+    {
+        MemTable memTable(walPath.string());
+        ASSERT_NO_FATAL_FAILURE(expectPut(memTable, "beta", "two"));
+        ASSERT_NO_FATAL_FAILURE(expectPut(memTable, "alpha", "one"));
+
+        ASSERT_NO_THROW(SSTable::build(memTable, sstablePath));
+    }
+
+    Cursor cursor(sstablePath);
+    ASSERT_TRUE(cursor.valid());
+    ASSERT_NO_FATAL_FAILURE(expectRecord(cursor.current(), "alpha", Type::VALUE, "one"));
+
+    cursor.advance();
+    ASSERT_TRUE(cursor.valid());
+    ASSERT_NO_FATAL_FAILURE(expectRecord(cursor.current(), "beta", Type::VALUE, "two"));
+
+    cursor.advance();
+    EXPECT_FALSE(cursor.valid());
+
+    std::filesystem::remove(sstablePath);
+    std::filesystem::remove(walPath);
+}
+
+TEST(SSTableTest, CursorExposesTombstoneRecords)
+{
+    const std::filesystem::path walPath("sstable_tests_cursor_tombstone.wal");
+    const std::filesystem::path sstablePath("sstable_tests_cursor_tombstone.sst");
+    std::filesystem::remove(walPath);
+    std::filesystem::remove(sstablePath);
+
+    {
+        MemTable memTable(walPath.string());
+        ASSERT_NO_FATAL_FAILURE(expectPut(memTable, "alpha", "one"));
+        ASSERT_NO_FATAL_FAILURE(expectPut(memTable, "beta", "two"));
+        ASSERT_TRUE(memTable.remove("alpha"));
+
+        ASSERT_NO_THROW(SSTable::build(memTable, sstablePath));
+    }
+
+    Cursor cursor(sstablePath);
+    ASSERT_TRUE(cursor.valid());
+    ASSERT_NO_FATAL_FAILURE(expectRecord(cursor.current(), "alpha", Type::TOMBSTONE, ""));
+
+    cursor.advance();
+    ASSERT_TRUE(cursor.valid());
+    ASSERT_NO_FATAL_FAILURE(expectRecord(cursor.current(), "beta", Type::VALUE, "two"));
+
+    cursor.advance();
+    EXPECT_FALSE(cursor.valid());
+
+    std::filesystem::remove(sstablePath);
+    std::filesystem::remove(walPath);
+}
+
+TEST(SSTableTest, CursorRejectsMissingFile)
+{
+    const std::filesystem::path sstablePath("sstable_tests_cursor_missing.sst");
+    std::filesystem::remove(sstablePath);
+
+    EXPECT_THROW(Cursor cursor(sstablePath), std::runtime_error);
 }
 
 TEST(SSTableTest, BuildWritesExpectedLittleEndianBytes)
