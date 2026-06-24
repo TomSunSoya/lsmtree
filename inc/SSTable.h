@@ -4,10 +4,23 @@
 
 class Cursor;
 
+class SSTableWriter
+{
+public:
+    explicit SSTableWriter(std::filesystem::path path);
+    void add(const Record &);
+    void finish();
+
+private:
+    std::filesystem::path path_, tempPath, parentDir;
+    FdGuard dataFd;
+};
+
 class SSTable
 {
 public:
     static void build(const MemTable &mt, const std::filesystem::path& path);
+    static void merge(const std::filesystem::path& path);
     static void cleanupOrphanedTemps(const std::filesystem::path& dir);
 
     explicit SSTable(std::filesystem::path path);

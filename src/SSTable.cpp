@@ -1,5 +1,6 @@
 #include "SSTable.h"
 
+#include <algorithm>
 #include <cassert>
 #include <cerrno>
 #include <cstddef>
@@ -9,47 +10,12 @@
 #include <utility>
 
 #include <fcntl.h>
+#include <format>
+#include <queue>
 #include <unistd.h>
 
 namespace
 {
-class FdGuard
-{
-public:
-    explicit FdGuard(const int fd) : fd_(fd) {}
-
-    FdGuard(const FdGuard &) = delete;
-    FdGuard &operator=(const FdGuard &) = delete;
-
-    ~FdGuard()
-    {
-        if (fd_ >= 0)
-            ::close(fd_);
-    }
-
-    [[nodiscard]] int get() const
-    {
-        return fd_;
-    }
-
-    void close()
-    {
-        if (fd_ < 0)
-            return;
-
-        if (::close(fd_) != 0)
-        {
-            const int err = errno;
-            throw std::system_error(err, std::generic_category(), "close failed");
-        }
-
-        fd_ = -1;
-    }
-
-private:
-    int fd_;
-};
-
 void writeAll(const int fd, const void *data, std::size_t size)
 {
     auto p = static_cast<const char *>(data);
@@ -74,10 +40,9 @@ void writeAll(const int fd, const void *data, std::size_t size)
 }
 }
 
-void SSTable::build(const MemTable &mt, const std::filesystem::path &path)
+SSTableWriter::SSTableWriter(std::filesystem::path path) : path_(std::move(path)), dataFd(-1)
 {
-    std::filesystem::path parentDir = path.parent_path();
-    if (parentDir.empty())
+    if (parentDir = path_.parent_path(); parentDir.empty())
     {
         parentDir = ".";
     }
@@ -86,33 +51,37 @@ void SSTable::build(const MemTable &mt, const std::filesystem::path &path)
         std::filesystem::create_directories(parentDir);
     }
 
-    if (std::filesystem::exists(path))
-        throw std::runtime_error("SSTable has been exist!");
-
-    const std::filesystem::path tempPath(path.string() + ".tmp");
-    const int dataFd = ::open(tempPath.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0664);
-    if (dataFd < 0)
+    tempPath = path_.string() + ".tmp";
+    int fd = ::open(tempPath.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0664);
+    if (fd < 0)
         throw std::runtime_error("Failed to open file for writing!");
+    dataFd.setFd(fd);
+}
 
-    FdGuard dataFile(dataFd);
-    for (auto &[key, entry] : mt)
+void SSTableWriter::add(const Record &record)
+{
+    auto &key = record.key;
+    auto &value = record.value;
+    const uint32_t key_size = key.size();
+    const uint32_t value_size = value.size();
+    const auto type = static_cast<uint8_t>(record.type);
+
+    writeAll(dataFd.get(), &type, sizeof(type));
+    writeAll(dataFd.get(), &key_size, sizeof(key_size));
+    writeAll(dataFd.get(), &value_size, sizeof(value_size));
+    writeAll(dataFd.get(), key.data(), key_size);
+    writeAll(dataFd.get(), value.data(), value_size);
+}
+
+void SSTableWriter::finish()
+{
+    if (::fsync(dataFd.get()))
     {
-        const uint32_t key_size = key.size();
-        const uint32_t value_size = entry.value.size();
-        auto type = static_cast<uint8_t>(entry.type);
-
-        writeAll(dataFile.get(), &type, sizeof(type));
-        writeAll(dataFile.get(), &key_size, sizeof(key_size));
-        writeAll(dataFile.get(), &value_size, sizeof(value_size));
-        writeAll(dataFile.get(), key.data(), key_size);
-        writeAll(dataFile.get(), entry.value.data(), value_size);
+        throw std::runtime_error("Failed to fsync table!");
     }
 
-    if (::fsync(dataFile.get()))
-        throw std::runtime_error("Failed to fsync!");
-    dataFile.close();
-
-    if (::rename(tempPath.c_str(), path.c_str()))
+    dataFd.close();
+    if (::rename(tempPath.c_str(), path_.c_str()))
     {
         const int err = errno;
         throw std::system_error(err, std::generic_category(), "rename failed");
@@ -126,6 +95,117 @@ void SSTable::build(const MemTable &mt, const std::filesystem::path &path)
     if (::fsync(dir.get()))
         throw std::runtime_error("Failed to fsync dir!");
     dir.close();
+}
+
+void SSTable::build(const MemTable &mt, const std::filesystem::path &path)
+{
+    if (std::filesystem::exists(path))
+        throw std::runtime_error("SSTable file already exists!");
+
+    SSTableWriter writer(path);
+    for (auto &[key, entry] : mt)
+    {
+        writer.add({key, entry.type, entry.value});
+    }
+
+    writer.finish();
+}
+
+void SSTable::merge(const std::filesystem::path& dir)
+{
+    namespace fs = std::filesystem;
+
+    if (!fs::exists(dir) || !fs::is_directory(dir))
+        throw std::runtime_error("SSTable directory must exist!");
+
+    std::vector<fs::path> sortedPaths;
+
+    for (std::error_code ec; const auto &entry : fs::directory_iterator(dir, ec))
+    {
+        if (ec)
+            throw std::runtime_error(entry.path().string() + ": " + ec.message());
+        if (!entry.is_regular_file(ec))
+            continue;
+
+        if (const fs::path &path = entry.path(); path.extension() == ".sst")
+        {
+            sortedPaths.push_back(path);
+        }
+    }
+
+    const auto ParseSSTableNumber = [] (const fs::path &file) -> uint64_t
+    {
+        const auto number = parseNumberedFile(file.filename().string(), "sst_", ".sst");
+        if (!number)
+            return 0;
+        return *number;
+    };
+
+    std::ranges::sort(sortedPaths, [&] (const fs::path &a, const fs::path &b) -> bool
+    {
+        return ParseSSTableNumber(a.filename().string()) < ParseSSTableNumber(b.filename().string());
+    });
+
+    std::vector<Cursor> cursors;
+    std::ranges::transform(sortedPaths, std::back_inserter(cursors), [] (const fs::path &path)
+    {
+        return Cursor{path};
+    });
+
+
+    struct Item
+    {
+        std::string key;
+        int index;
+
+        bool operator<(const Item &item) const
+        {
+            if (key != item.key)
+                return key > item.key;
+            return index < item.index;
+        }
+    };
+
+    std::priority_queue<Item> items;
+    for (int i = 0; i < cursors.size(); ++i)
+    {
+        if (auto &cursor = cursors[i]; cursor.valid())
+        {
+            auto &record = cursor.current();
+            Item item{record.key, i};
+            items.push(item);
+        }
+    }
+
+    auto number = maxFileByName(dir);
+    fs::path finalPath = dir / std::format("sst_{}.sst", number);
+    SSTableWriter writer(finalPath);
+
+    while (!items.empty())
+    {
+        const auto [key, index] = items.top();
+        items.pop();
+        auto &cursor = cursors[index];
+        writer.add(cursor.current());
+
+        // item.key == cursor.key
+        cursor.advance();
+
+        while (!items.empty() && key == items.top().key)
+        {
+            auto cur_index = items.top().index;
+            auto &cur_cursor = cursors[cur_index];
+            cur_cursor.advance();
+            items.pop();
+
+            if (cur_cursor.valid())
+                items.push({cur_cursor.current().key, cur_index});
+        }
+
+        if (cursor.valid())
+            items.push({cursor.current().key, index});
+    }
+    writer.finish();
 }
 
 void SSTable::cleanupOrphanedTemps(const std::filesystem::path& dir)

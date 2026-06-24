@@ -1,1 +1,1 @@
-SSTable 归并原语：给定多个 SSTable(按新→旧顺序),归并成一个新 SSTable——同一个 key 只保留最新版本,墓碑暂时保留(先不丢弃)。需先给 SSTable 加"按序遍历全部记录"的能力。做成纯函数:产出新文件,不接 DB、不删旧文件、不碰 manifest。附测试:重叠 key 取最新值、新墓碑盖旧值、不相关 key 全保留。
+引入 manifest：一个记录"当前活跃 SSTable 集合"的文件,原子更新(写临时→fsync→rename)。读路径和启动改为以 manifest 为准(不再扫目录/靠 maxFileByName),flush 时把新 SSTable 追加进 manifest。启动时:manifest 是真相,不在其中的 .sst 文件当孤儿清理。附测试:flush 后 manifest 含新表、重开按 manifest 恢复、孤儿 .sst 被清。

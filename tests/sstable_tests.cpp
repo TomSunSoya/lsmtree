@@ -5,6 +5,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <utility>
 
 #include <gtest/gtest.h>
 
@@ -94,6 +95,24 @@ void expectRecord(const Record &record, const std::string &key, const Type type,
     EXPECT_EQ(type, record.type);
     EXPECT_EQ(value, record.value);
 }
+
+class ScopedPathCleanup
+{
+public:
+    explicit ScopedPathCleanup(std::filesystem::path path) : path(std::move(path))
+    {
+        std::filesystem::remove_all(this->path);
+    }
+
+    ~ScopedPathCleanup()
+    {
+        std::error_code ec;
+        std::filesystem::remove_all(path, ec);
+    }
+
+private:
+    std::filesystem::path path;
+};
 }
 
 TEST(SSTableTest, BuildAndReadRecordsFromMemTable)
@@ -214,6 +233,38 @@ TEST(SSTableTest, CursorRejectsMissingFile)
     std::filesystem::remove(sstablePath);
 
     EXPECT_THROW(Cursor cursor(sstablePath), std::runtime_error);
+}
+
+TEST(SSTableTest, ParseNumberedFileAcceptsOnlyExactNumericMiddle)
+{
+    const auto zero = parseNumberedFile("sst_0.sst", "sst_", ".sst");
+    ASSERT_TRUE(zero);
+    EXPECT_EQ(0, *zero);
+
+    const auto padded = parseNumberedFile("wal_007.wal", "wal_", ".wal");
+    ASSERT_TRUE(padded);
+    EXPECT_EQ(7, *padded);
+
+    EXPECT_FALSE(parseNumberedFile("sst_.sst", "sst_", ".sst"));
+    EXPECT_FALSE(parseNumberedFile("sst_12x.sst", "sst_", ".sst"));
+    EXPECT_FALSE(parseNumberedFile("tmp_sst_12.sst", "sst_", ".sst"));
+    EXPECT_FALSE(parseNumberedFile("sst_12.sst.tmp", "sst_", ".sst"));
+}
+
+TEST(SSTableTest, MaxFileByNameReturnsNextSSTableNumberAndIgnoresNonMatches)
+{
+    const std::filesystem::path root("sstable_tests_max_file_by_name");
+    const ScopedPathCleanup cleanup(root);
+    std::filesystem::create_directories(root / "subdir");
+    ASSERT_NO_FATAL_FAILURE(writeFile(root / "sst_0.sst", ""));
+    ASSERT_NO_FATAL_FAILURE(writeFile(root / "sst_10.sst", ""));
+    ASSERT_NO_FATAL_FAILURE(writeFile(root / "sst_2.sst.tmp", ""));
+    ASSERT_NO_FATAL_FAILURE(writeFile(root / "sst_old.sst", ""));
+    ASSERT_NO_FATAL_FAILURE(writeFile(root / "wal_20.wal", ""));
+    ASSERT_NO_FATAL_FAILURE(writeFile(root / "subdir" / "sst_99.sst", ""));
+
+    EXPECT_EQ(11, maxFileByName(root));
+    EXPECT_EQ(0, maxFileByName(root / "missing"));
 }
 
 TEST(SSTableTest, BuildWritesExpectedLittleEndianBytes)
@@ -367,6 +418,67 @@ TEST(SSTableTest, BuildRejectsExistingFileWithoutOverwriting)
     std::filesystem::remove(sstablePath);
     std::filesystem::remove(originalWalPath);
     std::filesystem::remove(replacementWalPath);
+}
+
+TEST(SSTableTest, MergePublishesNextNumberedTableWithSortedRecords)
+{
+    const std::filesystem::path root("sstable_tests_merge_sorted");
+    const ScopedPathCleanup cleanup(root);
+    std::filesystem::create_directories(root);
+
+    {
+        MemTable memTable((root / "wal_0.wal").string());
+        ASSERT_NO_FATAL_FAILURE(expectPut(memTable, "gamma", "three"));
+        ASSERT_NO_THROW(SSTable::build(memTable, root / "sst_0.sst"));
+    }
+    {
+        MemTable memTable((root / "wal_1.wal").string());
+        ASSERT_NO_FATAL_FAILURE(expectPut(memTable, "alpha", "one"));
+        ASSERT_NO_FATAL_FAILURE(expectPut(memTable, "beta", "two"));
+        ASSERT_NO_THROW(SSTable::build(memTable, root / "sst_1.sst"));
+    }
+
+    ASSERT_NO_THROW(SSTable::merge(root));
+
+    const std::filesystem::path mergedPath = root / "sst_2.sst";
+    ASSERT_TRUE(std::filesystem::is_regular_file(mergedPath));
+
+    Cursor cursor(mergedPath);
+    ASSERT_TRUE(cursor.valid());
+    ASSERT_NO_FATAL_FAILURE(expectRecord(cursor.current(), "alpha", Type::VALUE, "one"));
+    cursor.advance();
+    ASSERT_TRUE(cursor.valid());
+    ASSERT_NO_FATAL_FAILURE(expectRecord(cursor.current(), "beta", Type::VALUE, "two"));
+    cursor.advance();
+    ASSERT_TRUE(cursor.valid());
+    ASSERT_NO_FATAL_FAILURE(expectRecord(cursor.current(), "gamma", Type::VALUE, "three"));
+    cursor.advance();
+    EXPECT_FALSE(cursor.valid());
+}
+
+TEST(SSTableTest, MergeKeepsNewestDuplicateAndContinuesOlderCursor)
+{
+    const std::filesystem::path root("sstable_tests_merge_duplicate_continues");
+    const ScopedPathCleanup cleanup(root);
+    std::filesystem::create_directories(root);
+
+    {
+        MemTable memTable((root / "wal_0.wal").string());
+        ASSERT_NO_FATAL_FAILURE(expectPut(memTable, "alpha", "old"));
+        ASSERT_NO_FATAL_FAILURE(expectPut(memTable, "beta", "kept"));
+        ASSERT_NO_THROW(SSTable::build(memTable, root / "sst_0.sst"));
+    }
+    {
+        MemTable memTable((root / "wal_1.wal").string());
+        ASSERT_NO_FATAL_FAILURE(expectPut(memTable, "alpha", "new"));
+        ASSERT_NO_THROW(SSTable::build(memTable, root / "sst_1.sst"));
+    }
+
+    ASSERT_NO_THROW(SSTable::merge(root));
+
+    const SSTable merged(root / "sst_2.sst");
+    ASSERT_NO_FATAL_FAILURE(expectGet(merged, "alpha", "new"));
+    ASSERT_NO_FATAL_FAILURE(expectGet(merged, "beta", "kept"));
 }
 
 TEST(SSTableTest, CleanupOrphanedTempsRemovesTemporaryFile)

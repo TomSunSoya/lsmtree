@@ -7,60 +7,6 @@
 
 namespace
 {
-    std::optional<uint64_t> parseNumberedFile(
-        const std::string_view filename,
-        const std::string_view prefix,
-        const std::string_view suffix)
-    {
-        if (filename.size() <= prefix.size() + suffix.size())
-            return std::nullopt;
-        if (!filename.starts_with(prefix))
-            return std::nullopt;
-        if (!filename.ends_with(suffix))
-            return std::nullopt;
-
-        const std::string numberStr{filename.substr(prefix.size(), filename.size() - prefix.size() - suffix.size())};
-        try
-        {
-            size_t pos = 0;
-            const auto value = std::stoull(numberStr, &pos, 10);
-            if (pos != numberStr.size())
-                return std::nullopt;
-
-            return value;
-        } catch (const std::exception &)
-        {
-            return std::nullopt;
-        }
-    }
-
-    uint64_t maxFileByName(const std::filesystem::path &path)
-    {
-        namespace fs = std::filesystem;
-        if (!fs::exists(path) || !fs::is_directory(path))
-            return 0;
-
-        std::error_code ec;
-        std::optional<uint64_t> currentFileNumber = std::nullopt;
-        for (const auto &entry : fs::directory_iterator(path, ec))
-        {
-            if (ec) return 0;
-            if (!entry.is_regular_file(ec))
-            {
-                ec.clear();
-                continue;
-            }
-
-            auto number = parseNumberedFile(entry.path().filename().string(), "sst_", ".sst");
-            if (!number)
-                continue;
-            if (!currentFileNumber || *currentFileNumber < *number)
-                currentFileNumber = *number;
-        }
-        if (currentFileNumber)
-            ++*currentFileNumber;
-        return currentFileNumber ? *currentFileNumber : 0;
-    }
     void cleanupOrphanedWAL(const std::filesystem::path& dir, const uint64_t currentFileNumber)
     {
         namespace fs = std::filesystem;
