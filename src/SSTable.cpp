@@ -2,17 +2,61 @@
 
 #include <algorithm>
 #include <cassert>
-#include <cerrno>
-#include <cstddef>
-#include <fstream>
-#include <stdexcept>
-#include <system_error>
-#include <utility>
-
+#include <filesystem>
 #include <format>
+#include <fstream>
+#include <iterator>
+#include <optional>
 #include <queue>
-#include <unistd.h>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
 
+namespace
+{
+    namespace fs = std::filesystem;
+
+    constexpr std::string_view kSSTablePrefix = "sst_";
+    constexpr auto kSSTableSuffix = ".sst";
+
+    std::optional<uint64_t> parseSSTableNumber(const fs::path &path)
+    {
+        return parseNumberedFile(path.filename().string(), kSSTablePrefix, kSSTableSuffix);
+    }
+
+    uint64_t sstableNumberOrZero(const fs::path &path)
+    {
+        const auto number = parseSSTableNumber(path);
+        return number.value_or(0);
+    }
+
+    std::vector<fs::path> sortedSSTablePaths(const fs::path& dir)
+    {
+        if (!fs::exists(dir) || !fs::is_directory(dir))
+            throw std::runtime_error("SSTable directory must exist!");
+
+        std::vector<fs::path> paths;
+        for (std::error_code ec; const auto &entry : fs::directory_iterator(dir, ec))
+        {
+            if (ec)
+                throw std::runtime_error(entry.path().string() + ": " + ec.message());
+            if (!entry.is_regular_file(ec))
+                continue;
+
+            if (const auto& path = entry.path(); path.extension() == kSSTableSuffix)
+                paths.push_back(path);
+        }
+
+        std::ranges::sort(paths, [] (const fs::path &a, const fs::path &b)
+        {
+            return sstableNumberOrZero(a) < sstableNumberOrZero(b);
+        });
+
+        return paths;
+    }
+}
 
 void SSTable::build(const MemTable &mt, const std::filesystem::path &path)
 {
@@ -30,38 +74,7 @@ void SSTable::build(const MemTable &mt, const std::filesystem::path &path)
 
 void SSTable::merge(const std::filesystem::path& dir)
 {
-    namespace fs = std::filesystem;
-
-    if (!fs::exists(dir) || !fs::is_directory(dir))
-        throw std::runtime_error("SSTable directory must exist!");
-
-    std::vector<fs::path> sortedPaths;
-
-    for (std::error_code ec; const auto &entry : fs::directory_iterator(dir, ec))
-    {
-        if (ec)
-            throw std::runtime_error(entry.path().string() + ": " + ec.message());
-        if (!entry.is_regular_file(ec))
-            continue;
-
-        if (const fs::path &path = entry.path(); path.extension() == ".sst")
-        {
-            sortedPaths.push_back(path);
-        }
-    }
-
-    const auto ParseSSTableNumber = [] (const fs::path &file) -> uint64_t
-    {
-        const auto number = parseNumberedFile(file.filename().string(), "sst_", ".sst");
-        if (!number)
-            return 0;
-        return *number;
-    };
-
-    std::ranges::sort(sortedPaths, [&] (const fs::path &a, const fs::path &b) -> bool
-    {
-        return ParseSSTableNumber(a.filename().string()) < ParseSSTableNumber(b.filename().string());
-    });
+    const auto sortedPaths = sortedSSTablePaths(dir);
 
     std::vector<Cursor> cursors;
     std::ranges::transform(sortedPaths, std::back_inserter(cursors), [] (const fs::path &path)
@@ -69,13 +82,12 @@ void SSTable::merge(const std::filesystem::path& dir)
         return Cursor{path};
     });
 
-
-    struct Item
+    struct MergeItem
     {
         std::string key;
         int index;
 
-        bool operator<(const Item &item) const
+        bool operator<(const MergeItem &item) const
         {
             if (key != item.key)
                 return key > item.key;
@@ -83,19 +95,15 @@ void SSTable::merge(const std::filesystem::path& dir)
         }
     };
 
-    std::priority_queue<Item> items;
+    std::priority_queue<MergeItem> items;
     for (int i = 0; i < cursors.size(); ++i)
     {
         if (auto &cursor = cursors[i]; cursor.valid())
-        {
-            auto &record = cursor.current();
-            Item item{record.key, i};
-            items.push(item);
-        }
+            items.push({cursor.current().key, i});
     }
 
-    auto number = maxFileByName(dir);
-    fs::path finalPath = dir / std::format("sst_{}.sst", number);
+    const auto number = maxFileByName(dir);
+    const fs::path finalPath = dir / std::format("{}{}{}", kSSTablePrefix, number, kSSTableSuffix);
     FileWriter writer(finalPath);
 
     while (!items.empty())
@@ -105,18 +113,17 @@ void SSTable::merge(const std::filesystem::path& dir)
         auto &cursor = cursors[index];
         writer.add(cursor.current());
 
-        // item.key == cursor.key
         cursor.advance();
 
         while (!items.empty() && key == items.top().key)
         {
-            auto cur_index = items.top().index;
-            auto &cur_cursor = cursors[cur_index];
-            cur_cursor.advance();
+            const auto duplicateIndex = items.top().index;
+            auto &duplicateCursor = cursors[duplicateIndex];
+            duplicateCursor.advance();
             items.pop();
 
-            if (cur_cursor.valid())
-                items.push({cur_cursor.current().key, cur_index});
+            if (duplicateCursor.valid())
+                items.push({duplicateCursor.current().key, duplicateIndex});
         }
 
         if (cursor.valid())
@@ -128,7 +135,6 @@ void SSTable::merge(const std::filesystem::path& dir)
 void SSTable::cleanupOrphanedTemps(const std::filesystem::path& dir)
 {
     std::error_code ec;
-    namespace fs = std::filesystem;
     if (!fs::exists(dir, ec) || !fs::is_directory(dir, ec))
         return;
 
@@ -232,4 +238,3 @@ void Cursor::advance()
     if (valid())
         currentRecord = SSTable::readOneRecord(ifs);
 }
-

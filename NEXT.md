@@ -1,1 +1,1 @@
-DB 以 manifest 为活跃 SSTable 的真相源：DB 持有 Manifest、构造时加载;文件号改用 manifest.allocateNumber()(替掉 currentFileNumber++ / maxFileByName);searchFromSSTable 遍历 manifest.tables()(新→旧)而非按号扫;flush 提交时序改为 build sst → manifest.addTable + save → 才删旧 WAL。孤儿 .sst 清理留到下一口。附测试:现有 DB 测试在 manifest 支撑下继续绿 + 重开经 manifest 恢复活跃表与号。
+启动时清理孤儿 SSTable：DB 构造加载 manifest 后，扫 sstable 目录，删除编号不在 manifest.tables() 中的 .sst 文件(崩溃 flush/compaction 留下、读路径已忽略的孤儿)。附测试：磁盘上有不在 manifest 的 sst → 构造后被删；在 manifest 里的保留。

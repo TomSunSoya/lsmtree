@@ -1,19 +1,49 @@
 #include "DB.h"
 
+#include <cerrno>
+#include <filesystem>
 #include <format>
 #include <iostream>
+#include <set>
+#include <stdexcept>
+#include <string_view>
+#include <system_error>
 
 #include "SSTable.h"
 
 namespace
 {
+    namespace fs = std::filesystem;
+
+    constexpr std::string_view kWalPrefix = "wal_";
+    constexpr std::string_view kWalSuffix = ".wal";
+    constexpr std::string_view kSSTablePrefix = "sst_";
+    constexpr std::string_view kSSTableSuffix = ".sst";
+
+    fs::path walPath(const fs::path& dataDir, const uint64_t fileNumber)
+    {
+        return dataDir / "wal" / std::format("{}{}{}", kWalPrefix, fileNumber, kWalSuffix);
+    }
+
+    fs::path sstablePath(const fs::path& dataDir, const uint64_t fileNumber)
+    {
+        return dataDir / "sstable" / std::format("{}{}{}", kSSTablePrefix, fileNumber, kSSTableSuffix);
+    }
+
+    void removeFile(const fs::path& path, const char* message)
+    {
+        if (::remove(path.c_str()))
+        {
+            const auto err = errno;
+            throw std::system_error(err, std::system_category(), message);
+        }
+    }
+
     void cleanupOrphanedWAL(const std::filesystem::path& dir, const uint64_t currentFileNumber)
     {
-        namespace fs = std::filesystem;
         if (!fs::exists(dir) || !fs::is_directory(dir))
             return;
 
-        constexpr std::string_view prefix = "wal_", suffix = ".wal";
         for (std::error_code ec; const auto &entry : fs::directory_iterator(dir, ec))
         {
             if (ec) return;
@@ -23,16 +53,31 @@ namespace
                 continue;
             }
 
-            const auto number = parseNumberedFile(entry.path().filename().string(), prefix, suffix);
+            const auto number = parseNumberedFile(entry.path().filename().string(), kWalPrefix, kWalSuffix);
             if (!number)
                 continue;
             if (*number < currentFileNumber)
+                removeFile(entry.path(), "remove wal file failed");
+        }
+    }
+
+    void cleanupOrphanedSSTables(const std::filesystem::path& dir, const std::set<uint64_t, std::greater<>> &tables)
+    {
+        if (!fs::exists(dir) || !fs::is_directory(dir))
+            return;
+
+        std::error_code ec;
+        for (const auto &entry : fs::directory_iterator(dir, ec))
+        {
+            if (ec) return;
+            if (!entry.is_regular_file(ec))
+                continue;
+            if (entry.path().extension() == ".sst")
             {
-                if (::remove(entry.path().c_str()))
-                {
-                    const auto err = errno;
-                    throw std::system_error(err, std::system_category(), "remove wal file failed");
-                }
+                const auto number = parseNumberedFile(entry.path().filename().string(), kSSTablePrefix, kSSTableSuffix);
+                if (!number || tables.contains(*number))
+                    continue;
+                removeFile(entry.path(), "remove sst file failed");
             }
         }
     }
@@ -48,12 +93,15 @@ DB::DB(const std::filesystem::path& data_dir, const uint64_t threshold_) : thres
 
     manifest = std::make_unique<Manifest>(data_dir / "MANIFEST");
 
-    SSTable::cleanupOrphanedTemps(data_dir / "sstable");
+    const auto sstableDir = data_dir / "sstable";
+    const auto walDir = data_dir / "wal";
+    SSTable::cleanupOrphanedTemps(sstableDir);
+    cleanupOrphanedSSTables(sstableDir, manifest->tables());
     const auto fileNumber = manifest->nextNumber();
 
     this->data_dir = data_dir;
-    walFilePath = data_dir / "wal" / std::format("wal_{}.wal", fileNumber);
-    cleanupOrphanedWAL(data_dir / "wal", fileNumber);
+    walFilePath = walPath(data_dir, fileNumber);
+    cleanupOrphanedWAL(walDir, fileNumber);
     actMemTable = std::make_unique<MemTable>(walFilePath.string());
 }
 
@@ -90,7 +138,7 @@ void DB::flush()
 {
     namespace fs = std::filesystem;
     const auto fileNumber = manifest->allocateNumber();
-    const auto ssTablePath = data_dir / "sstable" / std::format("sst_{}.sst", fileNumber);
+    const auto ssTablePath = sstablePath(data_dir, fileNumber);
     if (!fs::exists(ssTablePath.parent_path()))
         fs::create_directories(ssTablePath.parent_path());
 
@@ -100,22 +148,18 @@ void DB::flush()
 
     // old wal file number == current sstable file number
     const auto oldWalFilePath = walFilePath;
-    const auto newWalFilePath = data_dir / "wal" / std::format("wal_{}.wal", manifest->nextNumber());
+    const auto newWalFilePath = walPath(data_dir, manifest->nextNumber());
     actMemTable = std::make_unique<MemTable>(newWalFilePath.string());
     walFilePath = newWalFilePath;
 
-    if ( ::remove(oldWalFilePath.c_str()))
-    {
-        const int err = errno;
-        throw std::system_error(err, std::system_category(), "remove wal file failed");
-    }
+    removeFile(oldWalFilePath, "remove wal file failed");
 }
 
 bool DB::searchFromSSTable(std::string_view key, std::string& value) const
 {
     for (auto index : manifest->tables())
     {
-        const std::filesystem::path filePath = data_dir / "sstable" / std::format("sst_{}.sst", index);
+        const auto filePath = sstablePath(data_dir, index);
         SSTable cur_table(filePath);
         const auto ret = cur_table.get(key, value);
         if (ret == Result::VALUE)

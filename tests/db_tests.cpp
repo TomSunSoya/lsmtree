@@ -541,6 +541,35 @@ TEST(DBTest, ConstructorRemovesOrphanedSSTableTemporaryFiles)
     std::filesystem::remove_all(root);
 }
 
+TEST(DBTest, ConstructorRemovesSSTablesMissingFromManifestButKeepsActiveTables)
+{
+    const std::filesystem::path root("db_tests_cleanup_orphan_sstable");
+    const std::filesystem::path activeSSTablePath = root / "sstable" / "sst_0.sst";
+    const std::filesystem::path orphanSSTablePath = root / "sstable" / "sst_42.sst";
+    std::filesystem::remove_all(root);
+
+    {
+        DB db(root, kManualFlushThreshold);
+
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "alpha", "one"));
+        ASSERT_NO_THROW(db.flush());
+    }
+
+    ASSERT_TRUE(std::filesystem::is_regular_file(activeSSTablePath));
+    ASSERT_NO_FATAL_FAILURE(writeFile(orphanSSTablePath, "orphan sstable bytes"));
+    ASSERT_TRUE(std::filesystem::is_regular_file(orphanSSTablePath));
+
+    {
+        const DB db(root, kManualFlushThreshold);
+
+        EXPECT_TRUE(std::filesystem::is_regular_file(activeSSTablePath));
+        EXPECT_FALSE(std::filesystem::exists(orphanSSTablePath));
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "alpha", "one"));
+    }
+
+    std::filesystem::remove_all(root);
+}
+
 TEST(DBTest, NewerFlushedSSTableWinsForDuplicateKey)
 {
     const std::filesystem::path root("db_tests_newer_sstable_wins");
