@@ -1,1 +1,1 @@
-引入 manifest：一个记录"当前活跃 SSTable 集合"的文件,原子更新(写临时→fsync→rename)。读路径和启动改为以 manifest 为准(不再扫目录/靠 maxFileByName),flush 时把新 SSTable 追加进 manifest。启动时:manifest 是真相,不在其中的 .sst 文件当孤儿清理。附测试:flush 后 manifest 含新表、重开按 manifest 恢复、孤儿 .sst 被清。
+DB 以 manifest 为活跃 SSTable 的真相源：DB 持有 Manifest、构造时加载;文件号改用 manifest.allocateNumber()(替掉 currentFileNumber++ / maxFileByName);searchFromSSTable 遍历 manifest.tables()(新→旧)而非按号扫;flush 提交时序改为 build sst → manifest.addTable + save → 才删旧 WAL。孤儿 .sst 清理留到下一口。附测试:现有 DB 测试在 manifest 支撑下继续绿 + 重开经 manifest 恢复活跃表与号。

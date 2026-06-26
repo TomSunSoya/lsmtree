@@ -9,100 +9,17 @@
 #include <system_error>
 #include <utility>
 
-#include <fcntl.h>
 #include <format>
 #include <queue>
 #include <unistd.h>
 
-namespace
-{
-void writeAll(const int fd, const void *data, std::size_t size)
-{
-    auto p = static_cast<const char *>(data);
-    while (size > 0)
-    {
-        const ssize_t n = ::write(fd, p, size);
-        if (n < 0)
-        {
-            if (errno == EINTR)
-                continue;
-
-            const int err = errno;
-            throw std::system_error(err, std::generic_category(), "write failed");
-        }
-
-        if (n == 0)
-            throw std::runtime_error("write returned 0");
-
-        p += n;
-        size -= static_cast<std::size_t>(n);
-    }
-}
-}
-
-SSTableWriter::SSTableWriter(std::filesystem::path path) : path_(std::move(path)), dataFd(-1)
-{
-    if (parentDir = path_.parent_path(); parentDir.empty())
-    {
-        parentDir = ".";
-    }
-    else
-    {
-        std::filesystem::create_directories(parentDir);
-    }
-
-    tempPath = path_.string() + ".tmp";
-    int fd = ::open(tempPath.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0664);
-    if (fd < 0)
-        throw std::runtime_error("Failed to open file for writing!");
-    dataFd.setFd(fd);
-}
-
-void SSTableWriter::add(const Record &record)
-{
-    auto &key = record.key;
-    auto &value = record.value;
-    const uint32_t key_size = key.size();
-    const uint32_t value_size = value.size();
-    const auto type = static_cast<uint8_t>(record.type);
-
-    writeAll(dataFd.get(), &type, sizeof(type));
-    writeAll(dataFd.get(), &key_size, sizeof(key_size));
-    writeAll(dataFd.get(), &value_size, sizeof(value_size));
-    writeAll(dataFd.get(), key.data(), key_size);
-    writeAll(dataFd.get(), value.data(), value_size);
-}
-
-void SSTableWriter::finish()
-{
-    if (::fsync(dataFd.get()))
-    {
-        throw std::runtime_error("Failed to fsync table!");
-    }
-
-    dataFd.close();
-    if (::rename(tempPath.c_str(), path_.c_str()))
-    {
-        const int err = errno;
-        throw std::system_error(err, std::generic_category(), "rename failed");
-    }
-
-    const int dirFd = ::open(parentDir.c_str(), O_RDONLY);
-    if (dirFd < 0)
-        throw std::runtime_error("Failed to open dir for reading!");
-
-    FdGuard dir(dirFd);
-    if (::fsync(dir.get()))
-        throw std::runtime_error("Failed to fsync dir!");
-    dir.close();
-}
 
 void SSTable::build(const MemTable &mt, const std::filesystem::path &path)
 {
     if (std::filesystem::exists(path))
         throw std::runtime_error("SSTable file already exists!");
 
-    SSTableWriter writer(path);
+    FileWriter writer(path);
     for (auto &[key, entry] : mt)
     {
         writer.add({key, entry.type, entry.value});
@@ -179,7 +96,7 @@ void SSTable::merge(const std::filesystem::path& dir)
 
     auto number = maxFileByName(dir);
     fs::path finalPath = dir / std::format("sst_{}.sst", number);
-    SSTableWriter writer(finalPath);
+    FileWriter writer(finalPath);
 
     while (!items.empty())
     {

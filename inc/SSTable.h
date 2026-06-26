@@ -4,18 +4,6 @@
 
 class Cursor;
 
-class SSTableWriter
-{
-public:
-    explicit SSTableWriter(std::filesystem::path path);
-    void add(const Record &);
-    void finish();
-
-private:
-    std::filesystem::path path_, tempPath, parentDir;
-    FdGuard dataFd;
-};
-
 class SSTable
 {
 public:

@@ -1,6 +1,10 @@
 #pragma once
-#include <cstdint>
+#include <cerrno>
+#include <filesystem>
+#include <optional>
 #include <string>
+#include <system_error>
+#include <unistd.h>
 
 enum class Type : uint8_t
 {
@@ -126,4 +130,41 @@ public:
 
 private:
     int fd_;
+};
+
+static void writeAll(const int fd, const void *data, std::size_t size)
+{
+    auto p = static_cast<const char *>(data);
+    while (size > 0)
+    {
+        const ssize_t n = ::write(fd, p, size);
+        if (n < 0)
+        {
+            if (errno == EINTR)
+                continue;
+
+            const int err = errno;
+            throw std::system_error(err, std::generic_category(), "write failed");
+        }
+
+        if (n == 0)
+            throw std::runtime_error("write returned 0");
+
+        p += n;
+        size -= static_cast<std::size_t>(n);
+    }
+}
+
+
+class FileWriter
+{
+public:
+    explicit FileWriter(std::filesystem::path path);
+    void add(const Record &);
+    void finish();
+    [[nodiscard]] int getFd() const;
+
+private:
+    std::filesystem::path path_, tempPath, parentDir;
+    FdGuard dataFd;
 };
