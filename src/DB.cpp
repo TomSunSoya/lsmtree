@@ -46,12 +46,14 @@ DB::DB(const std::filesystem::path& data_dir, const uint64_t threshold_) : thres
     else if (!fs::is_directory(data_dir))
         throw std::invalid_argument("Data directory is not a directory!");
 
+    manifest = std::make_unique<Manifest>(data_dir / "MANIFEST");
+
     SSTable::cleanupOrphanedTemps(data_dir / "sstable");
-    currentFileNumber = maxFileByName(data_dir / "sstable");
+    const auto fileNumber = manifest->nextNumber();
 
     this->data_dir = data_dir;
-    walFilePath = data_dir / "wal" / std::format("wal_{}.wal", currentFileNumber);
-    cleanupOrphanedWAL(data_dir / "wal", currentFileNumber);
+    walFilePath = data_dir / "wal" / std::format("wal_{}.wal", fileNumber);
+    cleanupOrphanedWAL(data_dir / "wal", fileNumber);
     actMemTable = std::make_unique<MemTable>(walFilePath.string());
 }
 
@@ -87,18 +89,22 @@ bool DB::remove(const std::string &key)
 void DB::flush()
 {
     namespace fs = std::filesystem;
-    const auto ssTablePath = data_dir / "sstable" / std::format("sst_{}.sst", currentFileNumber++);
+    const auto fileNumber = manifest->allocateNumber();
+    const auto ssTablePath = data_dir / "sstable" / std::format("sst_{}.sst", fileNumber);
     if (!fs::exists(ssTablePath.parent_path()))
         fs::create_directories(ssTablePath.parent_path());
 
     SSTable::build(*actMemTable, ssTablePath);
+    manifest->addTable(fileNumber);
+    manifest->save();
 
+    // old wal file number == current sstable file number
     const auto oldWalFilePath = walFilePath;
-    const auto newWalFilePath = data_dir / "wal" / std::format("wal_{}.wal", currentFileNumber);
+    const auto newWalFilePath = data_dir / "wal" / std::format("wal_{}.wal", manifest->nextNumber());
     actMemTable = std::make_unique<MemTable>(newWalFilePath.string());
     walFilePath = newWalFilePath;
 
-    if (::remove(oldWalFilePath.c_str()))
+    if ( ::remove(oldWalFilePath.c_str()))
     {
         const int err = errno;
         throw std::system_error(err, std::system_category(), "remove wal file failed");
@@ -107,10 +113,9 @@ void DB::flush()
 
 bool DB::searchFromSSTable(std::string_view key, std::string& value) const
 {
-    if (!currentFileNumber) return false;
-    for (int64_t i = currentFileNumber - 1; i >= 0; --i)
+    for (auto index : manifest->tables())
     {
-        const std::filesystem::path filePath = data_dir / "sstable" / std::format("sst_{}.sst", i);
+        const std::filesystem::path filePath = data_dir / "sstable" / std::format("sst_{}.sst", index);
         SSTable cur_table(filePath);
         const auto ret = cur_table.get(key, value);
         if (ret == Result::VALUE)

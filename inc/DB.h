@@ -3,6 +3,7 @@
 
 #include <memory>
 #include "MemTable.h"
+#include "Manifest.h"
 
 class DB
 {
@@ -18,8 +19,8 @@ private:
     std::unique_ptr<MemTable> actMemTable;
     std::filesystem::path data_dir;
     std::filesystem::path walFilePath;
-    uint64_t currentFileNumber = 0;
     uint64_t threshold;
+    std::unique_ptr<Manifest> manifest;
 
     bool searchFromSSTable(std::string_view key, std::string& value) const;
 };
