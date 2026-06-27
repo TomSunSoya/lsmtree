@@ -72,9 +72,9 @@ void SSTable::build(const MemTable &mt, const std::filesystem::path &path)
     writer.finish();
 }
 
-void SSTable::merge(const std::filesystem::path& dir)
+void SSTable::merge(const std::filesystem::path& inputs, const std::filesystem::path& outPath)
 {
-    const auto sortedPaths = sortedSSTablePaths(dir);
+    const auto sortedPaths = sortedSSTablePaths(inputs);
 
     std::vector<Cursor> cursors;
     std::ranges::transform(sortedPaths, std::back_inserter(cursors), [] (const fs::path &path)
@@ -102,9 +102,7 @@ void SSTable::merge(const std::filesystem::path& dir)
             items.push({cursor.current().key, i});
     }
 
-    const auto number = maxFileByName(dir);
-    const fs::path finalPath = dir / std::format("{}{}{}", kSSTablePrefix, number, kSSTableSuffix);
-    FileWriter writer(finalPath);
+    FileWriter writer(outPath);
 
     while (!items.empty())
     {

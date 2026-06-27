@@ -21,7 +21,9 @@ Manifest::Manifest(std::filesystem::path path) : path_(std::move(path))
             std::string name = line.substr(0, pos);
             std::string numStr = line.substr(pos + 1);
             uint64_t num = std::stoull(numStr);
-            if (name == "version")
+            if (name == "log")
+                logNumber_ = num;
+            else if (name == "version")
                 version_ = num;
             else if (name == "next")
                 next_ = num;
@@ -61,10 +63,12 @@ void Manifest::replaceTables(const std::vector<uint64_t>& removed, uint64_t adde
 void Manifest::save() const
 {
     FileWriter writer(path_);
+    std::string logStr = std::format("log:{}\n", logNumber_);
     std::string versionStr = std::format("version:{}\n", version_);
     std::string nextStr = std::format("next:{}\n", next_);
-    writeAll(writer.getFd(), versionStr.data(), versionStr.size());
-    writeAll(writer.getFd(), nextStr.data(), nextStr.size());
+    writeAll(writer.getFd(), logStr.data(), logStr.length());
+    writeAll(writer.getFd(), versionStr.data(), versionStr.length());
+    writeAll(writer.getFd(), nextStr.data(), nextStr.length());
     for (auto table : tables_)
     {
         std::string line = std::format("table:{}\n", table);

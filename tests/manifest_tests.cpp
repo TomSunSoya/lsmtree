@@ -128,7 +128,7 @@ TEST(ManifestTest, SavePublishesThroughTemporaryFileAndRemovesStaleTemp)
 
     std::string content;
     ASSERT_NO_FATAL_FAILURE(readFile(manifestPath, content));
-    EXPECT_EQ("version:0\nnext:0\ntable:4\n", content);
+    EXPECT_EQ("log:0\nversion:0\nnext:0\ntable:4\n", content);
 }
 
 TEST(ManifestTest, ReplaceTablesPersistsCompactionResult)

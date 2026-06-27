@@ -1,1 +1,1 @@
-启动时清理孤儿 SSTable：DB 构造加载 manifest 后，扫 sstable 目录，删除编号不在 manifest.tables() 中的 .sst 文件(崩溃 flush/compaction 留下、读路径已忽略的孤儿)。附测试：磁盘上有不在 manifest 的 sst → 构造后被删；在 manifest 里的保留。
+DB::compact() 全量合并：把 manifest 当前所有活跃 SSTable 用 merge 合成一个新 SSTable(号从 allocateNumber),manifest.replaceTables+save 原子提交,再删输入文件。先做显式 compact(),不接自动触发。附测试:put 多批+多次 flush 造出多个 sst → compact() → 活跃表降为 1、所有 key 读得到、被覆盖的旧值/被删 key 语义正确、重开数据不变。

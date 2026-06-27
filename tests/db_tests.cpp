@@ -423,12 +423,12 @@ TEST(DBTest, ReopensFromFlushedSSTable)
     std::filesystem::remove_all(root);
 }
 
-TEST(DBTest, ReopenContinuesSSTableNumberAfterExistingFiles)
+TEST(DBTest, ReopenContinuesGlobalFileNumberAfterExistingFiles)
 {
     const std::filesystem::path root("db_tests_continue_sstable_number");
     const std::filesystem::path firstSSTablePath = root / "sstable" / "sst_0.sst";
-    const std::filesystem::path secondSSTablePath = root / "sstable" / "sst_1.sst";
-    const std::filesystem::path nextWalPath = root / "wal" / "wal_2.wal";
+    const std::filesystem::path secondSSTablePath = root / "sstable" / "sst_2.sst";
+    const std::filesystem::path nextWalPath = root / "wal" / "wal_3.wal";
     std::filesystem::remove_all(root);
 
     {
@@ -450,6 +450,29 @@ TEST(DBTest, ReopenContinuesSSTableNumberAfterExistingFiles)
     EXPECT_TRUE(std::filesystem::is_regular_file(firstSSTablePath));
     EXPECT_TRUE(std::filesystem::is_regular_file(secondSSTablePath));
     EXPECT_TRUE(std::filesystem::is_regular_file(nextWalPath));
+
+    std::filesystem::remove_all(root);
+}
+
+TEST(DBTest, ReopensFromActiveWalAfterFlush)
+{
+    const std::filesystem::path root("db_tests_reopen_active_wal_after_flush");
+    std::filesystem::remove_all(root);
+
+    {
+        DB db(root, kManualFlushThreshold);
+
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "before-flush", "persisted-in-sstable"));
+        ASSERT_NO_THROW(db.flush());
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "after-flush", "persisted-in-wal"));
+    }
+
+    {
+        const DB db(root, kManualFlushThreshold);
+
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "before-flush", "persisted-in-sstable"));
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "after-flush", "persisted-in-wal"));
+    }
 
     std::filesystem::remove_all(root);
 }

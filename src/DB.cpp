@@ -97,11 +97,10 @@ DB::DB(const std::filesystem::path& data_dir, const uint64_t threshold_) : thres
     const auto walDir = data_dir / "wal";
     SSTable::cleanupOrphanedTemps(sstableDir);
     cleanupOrphanedSSTables(sstableDir, manifest->tables());
-    const auto fileNumber = manifest->nextNumber();
 
     this->data_dir = data_dir;
-    walFilePath = walPath(data_dir, fileNumber);
-    cleanupOrphanedWAL(walDir, fileNumber);
+    walFilePath = walPath(data_dir, manifest->logNumber());
+    cleanupOrphanedWAL(walDir, manifest->logNumber());
     actMemTable = std::make_unique<MemTable>(walFilePath.string());
 }
 
@@ -142,13 +141,16 @@ void DB::flush()
     if (!fs::exists(ssTablePath.parent_path()))
         fs::create_directories(ssTablePath.parent_path());
 
+    const auto walFileNumber = manifest->allocateNumber();
+    manifest->setLogNumber(walFileNumber);
+
     SSTable::build(*actMemTable, ssTablePath);
     manifest->addTable(fileNumber);
     manifest->save();
 
     // old wal file number == current sstable file number
     const auto oldWalFilePath = walFilePath;
-    const auto newWalFilePath = walPath(data_dir, manifest->nextNumber());
+    const auto newWalFilePath = walPath(data_dir, walFileNumber);
     actMemTable = std::make_unique<MemTable>(newWalFilePath.string());
     walFilePath = newWalFilePath;
 
@@ -157,7 +159,7 @@ void DB::flush()
 
 bool DB::searchFromSSTable(std::string_view key, std::string& value) const
 {
-    for (auto index : manifest->tables())
+    for (const auto index : manifest->tables())
     {
         const auto filePath = sstablePath(data_dir, index);
         SSTable cur_table(filePath);

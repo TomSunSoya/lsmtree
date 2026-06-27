@@ -251,22 +251,6 @@ TEST(SSTableTest, ParseNumberedFileAcceptsOnlyExactNumericMiddle)
     EXPECT_FALSE(parseNumberedFile("sst_12.sst.tmp", "sst_", ".sst"));
 }
 
-TEST(SSTableTest, MaxFileByNameReturnsNextSSTableNumberAndIgnoresNonMatches)
-{
-    const std::filesystem::path root("sstable_tests_max_file_by_name");
-    const ScopedPathCleanup cleanup(root);
-    std::filesystem::create_directories(root / "subdir");
-    ASSERT_NO_FATAL_FAILURE(writeFile(root / "sst_0.sst", ""));
-    ASSERT_NO_FATAL_FAILURE(writeFile(root / "sst_10.sst", ""));
-    ASSERT_NO_FATAL_FAILURE(writeFile(root / "sst_2.sst.tmp", ""));
-    ASSERT_NO_FATAL_FAILURE(writeFile(root / "sst_old.sst", ""));
-    ASSERT_NO_FATAL_FAILURE(writeFile(root / "wal_20.wal", ""));
-    ASSERT_NO_FATAL_FAILURE(writeFile(root / "subdir" / "sst_99.sst", ""));
-
-    EXPECT_EQ(11, maxFileByName(root));
-    EXPECT_EQ(0, maxFileByName(root / "missing"));
-}
-
 TEST(SSTableTest, BuildWritesExpectedLittleEndianBytes)
 {
     const std::filesystem::path walPath("sstable_tests_exact_bytes.wal");
@@ -420,11 +404,12 @@ TEST(SSTableTest, BuildRejectsExistingFileWithoutOverwriting)
     std::filesystem::remove(replacementWalPath);
 }
 
-TEST(SSTableTest, MergePublishesNextNumberedTableWithSortedRecords)
+TEST(SSTableTest, MergeWritesRequestedOutputWithSortedRecords)
 {
     const std::filesystem::path root("sstable_tests_merge_sorted");
     const ScopedPathCleanup cleanup(root);
     std::filesystem::create_directories(root);
+    const std::filesystem::path mergedPath = root / "merged-output";
 
     {
         MemTable memTable((root / "wal_0.wal").string());
@@ -438,9 +423,8 @@ TEST(SSTableTest, MergePublishesNextNumberedTableWithSortedRecords)
         ASSERT_NO_THROW(SSTable::build(memTable, root / "sst_1.sst"));
     }
 
-    ASSERT_NO_THROW(SSTable::merge(root));
+    ASSERT_NO_THROW(SSTable::merge(root, mergedPath));
 
-    const std::filesystem::path mergedPath = root / "sst_2.sst";
     ASSERT_TRUE(std::filesystem::is_regular_file(mergedPath));
 
     Cursor cursor(mergedPath);
@@ -461,6 +445,7 @@ TEST(SSTableTest, MergeKeepsNewestDuplicateAndContinuesOlderCursor)
     const std::filesystem::path root("sstable_tests_merge_duplicate_continues");
     const ScopedPathCleanup cleanup(root);
     std::filesystem::create_directories(root);
+    const std::filesystem::path mergedPath = root / "merged-output";
 
     {
         MemTable memTable((root / "wal_0.wal").string());
@@ -474,9 +459,9 @@ TEST(SSTableTest, MergeKeepsNewestDuplicateAndContinuesOlderCursor)
         ASSERT_NO_THROW(SSTable::build(memTable, root / "sst_1.sst"));
     }
 
-    ASSERT_NO_THROW(SSTable::merge(root));
+    ASSERT_NO_THROW(SSTable::merge(root, mergedPath));
 
-    const SSTable merged(root / "sst_2.sst");
+    const SSTable merged(mergedPath);
     ASSERT_NO_FATAL_FAILURE(expectGet(merged, "alpha", "new"));
     ASSERT_NO_FATAL_FAILURE(expectGet(merged, "beta", "kept"));
 }

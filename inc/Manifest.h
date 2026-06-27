@@ -23,11 +23,22 @@ public:
 
     void save() const;
 
+    [[nodiscard]] uint64_t logNumber() const
+    {
+        return logNumber_;
+    }
+
+    void setLogNumber(const uint64_t log_number)
+    {
+        logNumber_ = log_number;
+    }
+
 private:
     std::filesystem::path path_;
     std::set<uint64_t, std::greater<>> tables_;
     uint64_t next_{};
     uint8_t version_{};
+    uint64_t logNumber_{};
 };
 
 

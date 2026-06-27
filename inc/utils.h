@@ -60,34 +60,6 @@ inline std::optional<uint64_t> parseNumberedFile(
     }
 }
 
-inline uint64_t maxFileByName(const std::filesystem::path &path)
-{
-    namespace fs = std::filesystem;
-    if (!fs::exists(path) || !fs::is_directory(path))
-        return 0;
-
-    std::error_code ec;
-    std::optional<uint64_t> currentFileNumber = std::nullopt;
-    for (const auto &entry : fs::directory_iterator(path, ec))
-    {
-        if (ec) return 0;
-        if (!entry.is_regular_file(ec))
-        {
-            ec.clear();
-            continue;
-        }
-
-        auto number = parseNumberedFile(entry.path().filename().string(), "sst_", ".sst");
-        if (!number)
-            continue;
-        if (!currentFileNumber || *currentFileNumber < *number)
-            currentFileNumber = *number;
-    }
-    if (currentFileNumber)
-        ++*currentFileNumber;
-    return currentFileNumber ? *currentFileNumber : 0;
-}
-
 class FdGuard
 {
 public:
