@@ -1,1 +1,1 @@
-单机LSM基本完成
+实现 BloomFilter 数据结构：位数组 + k 个哈希;add(key) 置 k 位,mightContain(key) 查 k 位(任一为 0 → 绝对不存在,全 1 → 可能存在)。独立类,不接 SSTable。附测试：加入的 key 永远 mightContain=true(零假阴性)、大量未加入 key 的假阳性率大致符合预期。

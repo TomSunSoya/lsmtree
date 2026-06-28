@@ -13,7 +13,9 @@ add_library(lsmtree_lib
         inc/SSTable.h
         inc/Manifest.h
         src/DB.cpp
-        inc/DB.h)
+        inc/DB.h
+        src/BloomFilter.cpp
+        inc/BloomFilter.h)
 target_include_directories(lsmtree_lib PUBLIC inc)
 
 enable_testing()
@@ -32,8 +34,12 @@ target_link_libraries(manifest_tests PRIVATE lsmtree_lib GTest::gtest_main)
 add_executable(db_tests tests/db_tests.cpp)
 target_link_libraries(db_tests PRIVATE lsmtree_lib GTest::gtest_main)
 
+add_executable(bloom_filter_tests tests/bloom_filter_tests.cpp)
+target_link_libraries(bloom_filter_tests PRIVATE lsmtree_lib GTest::gtest_main)
+
 include(GoogleTest)
 gtest_discover_tests(memtable_tests)
 gtest_discover_tests(sstable_tests)
 gtest_discover_tests(manifest_tests)
 gtest_discover_tests(db_tests)
+gtest_discover_tests(bloom_filter_tests)
