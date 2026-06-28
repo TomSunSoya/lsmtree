@@ -1,7 +1,7 @@
 #include "utils.h"
 
 #include <filesystem>
-#include <sys/fcntl.h>
+#include <fcntl.h>
 
 FileWriter::FileWriter(std::filesystem::path path) : path_(std::move(path)), dataFd(-1)
 {

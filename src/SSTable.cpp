@@ -21,6 +21,7 @@ namespace
 
     constexpr std::string_view kSSTablePrefix = "sst_";
     constexpr auto kSSTableSuffix = ".sst";
+    constexpr int footOffset = 24;
 
     std::optional<uint64_t> parseSSTableNumber(const fs::path &path)
     {
@@ -149,13 +150,14 @@ SSTable::SSTable(std::filesystem::path path) : path(std::move(path))
     if (!ifs)
         throw std::runtime_error("Could not open file: " + this->path.string());
 
-    ifs.seekg(-16, std::ios::end);
+    ifs.seekg(-footOffset, std::ios::end);
 
-    std::byte buf[16];
-    ifs.read(reinterpret_cast<char*>(buf), 16);
+    std::byte buf[footOffset];
+    ifs.read(reinterpret_cast<char*>(buf), footOffset);
 
     std::memcpy(&recordsSize, buf, sizeof(recordsSize));
     std::memcpy(&bloomSize, buf + 8, sizeof(bloomSize));
+    std::memcpy(&indexSize, buf + 16, sizeof(indexSize));
 
     ifs.seekg(recordsSize, std::ios::beg);
     std::vector<std::byte> bloomBytes(bloomSize);
@@ -224,19 +226,42 @@ void SSTable::addRecordToFile(const std::filesystem::path& path, const std::vect
     BloomFilter bloom_filter(records.size(), 0.01);
     FileWriter writer(path);
 
+    std::vector<Index> indices;
     uint64_t recordSize = 0;
+    uint64_t blockSize = 0;
     for (const auto & [key, type, value] : records)
     {
-        recordSize += writer.add({key, type, value});
+        if (recordSize == 0 || blockSize > BLOCK_SIZE)
+        {
+            blockSize = 0;
+            indices.emplace_back(key.size(), key, recordSize);
+        }
+
+        const auto currentRecordSize = writer.add({key, type, value});
+        recordSize += currentRecordSize;
+        blockSize += currentRecordSize;
         bloom_filter.add(key);
     }
 
     const auto &bytes = BloomFilter::Serialize(bloom_filter);
     writeAll(writer.getFd(), bytes.data(), bytes.size());
+
+    uint64_t indexSize = 0;
+    for (const auto & [keySize, key, offset] : indices)
+    {
+        writeAll(writer.getFd(), &keySize, sizeof(keySize));
+        writeAll(writer.getFd(), key.data(), key.size());
+        writeAll(writer.getFd(), &offset, sizeof(offset));
+        indexSize += sizeof(keySize) + key.size() + sizeof(offset);
+    }
+
     writeAll(writer.getFd(), &recordSize, sizeof(recordSize));
 
     const auto bloomSize = bytes.size();
     writeAll(writer.getFd(), &bloomSize, sizeof(bloomSize));
+
+    writeAll(writer.getFd(), &indexSize, sizeof(indexSize));
+
     writer.finish();
 }
 
@@ -249,13 +274,14 @@ Cursor::Cursor(std::filesystem::path path) : path(std::move(path))
     if (!ifs.is_open())
         throw std::runtime_error("Failed to open SSTable file!");
 
-    ifs.seekg(-16, std::ios::end);
+    ifs.seekg(-footOffset, std::ios::end);
 
-    std::byte buf[16];
-    ifs.read(reinterpret_cast<char*>(buf), 16);
+    std::byte buf[footOffset];
+    ifs.read(reinterpret_cast<char*>(buf), footOffset);
 
     std::memcpy(&recordsSize, buf, sizeof(recordsSize));
     std::memcpy(&bloomSize, buf + 8, sizeof(bloomSize));
+    std::memcpy(&indexSize, buf + 16, sizeof(indexSize));
 
     ifs.seekg(0, std::ios::beg);
 

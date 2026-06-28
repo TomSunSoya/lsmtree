@@ -18,9 +18,10 @@ public:
 
 private:
     std::filesystem::path path;
-    uint64_t recordsSize{}, bloomSize{};
+    uint64_t recordsSize{}, bloomSize{}, indexSize{};
     std::unique_ptr<BloomFilter> bloomFilter{};
     friend class Cursor;
+    static constexpr size_t BLOCK_SIZE = 4 * 1024;
 
     static std::optional<Record> readOneRecord(std::ifstream &ifs);
     static void addRecordToFile(const std::filesystem::path &path, const std::vector<Record> &records);
@@ -39,5 +40,5 @@ private:
     std::filesystem::path path;
     std::optional<Record> currentRecord{};
     std::ifstream ifs;
-    uint64_t recordsSize{}, bloomSize{}, currentPos{};
+    uint64_t recordsSize{}, bloomSize{}, currentPos{}, indexSize{};
 };

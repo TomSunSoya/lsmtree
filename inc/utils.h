@@ -32,6 +32,12 @@ struct Record
     std::string value;
 };
 
+struct Index
+{
+    uint32_t keySize;
+    std::string key;
+    uint64_t offset;
+};
 
 inline std::optional<uint64_t> parseNumberedFile(
     const std::string_view filename,
