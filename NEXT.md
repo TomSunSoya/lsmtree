@@ -1,1 +1,1 @@
-实现 BloomFilter 数据结构：位数组 + k 个哈希;add(key) 置 k 位,mightContain(key) 查 k 位(任一为 0 → 绝对不存在,全 1 → 可能存在)。独立类,不接 SSTable。附测试：加入的 key 永远 mightContain=true(零假阴性)、大量未加入 key 的假阳性率大致符合预期。
+给 BloomFilter 加：序列化(把 m、k、bit 数组写成字节)+ 从字节加载(一个独立于 (n,p) 的构造路径)。附测试：加一批 key → 序列化 → 从字节重建 → 那批 key 仍然 mightContain=true、假阳性率不变。
