@@ -21,7 +21,7 @@ FileWriter::FileWriter(std::filesystem::path path) : path_(std::move(path)), dat
     dataFd.setFd(fd);
 }
 
-void FileWriter::add(const Record &record)
+uint64_t FileWriter::add(const Record &record)
 {
     auto &key = record.key;
     auto &value = record.value;
@@ -34,6 +34,7 @@ void FileWriter::add(const Record &record)
     writeAll(dataFd.get(), &value_size, sizeof(value_size));
     writeAll(dataFd.get(), key.data(), key_size);
     writeAll(dataFd.get(), value.data(), value_size);
+    return 9 + key_size + value_size;
 }
 
 void FileWriter::finish()

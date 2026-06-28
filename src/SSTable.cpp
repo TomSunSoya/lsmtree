@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <cassert>
 #include <filesystem>
-#include <format>
 #include <fstream>
 #include <iterator>
 #include <optional>
@@ -13,6 +12,8 @@
 #include <string_view>
 #include <utility>
 #include <vector>
+
+#include "BloomFilter.h"
 
 namespace
 {
@@ -31,6 +32,13 @@ namespace
         const auto number = parseSSTableNumber(path);
         return number.value_or(0);
     }
+
+    uint64_t getRecordSize(const std::optional<Record> &record)
+    {
+        if (!record)
+            return 0;
+        return 9 + record->key.size() + record->value.size();
+    }
 }
 
 void SSTable::build(const MemTable &mt, const std::filesystem::path &path)
@@ -38,13 +46,13 @@ void SSTable::build(const MemTable &mt, const std::filesystem::path &path)
     if (std::filesystem::exists(path))
         throw std::runtime_error("SSTable file already exists!");
 
-    FileWriter writer(path);
+    std::vector<Record> records;
     for (auto &[key, entry] : mt)
     {
-        writer.add({key, entry.type, entry.value});
+        records.emplace_back(key, entry.type, entry.value);
     }
 
-    writer.finish();
+    addRecordToFile(path, records);
 }
 
 void SSTable::merge(std::vector<std::filesystem::path> inputs, const std::filesystem::path& outPath)
@@ -80,14 +88,14 @@ void SSTable::merge(std::vector<std::filesystem::path> inputs, const std::filesy
             items.push({cursor.current().key, i});
     }
 
-    FileWriter writer(outPath);
+    std::vector<Record> records;
 
     while (!items.empty())
     {
         const auto [key, index] = items.top();
         items.pop();
         auto &cursor = cursors[index];
-        writer.add(cursor.current());
+        records.push_back(cursor.current());
 
         cursor.advance();
 
@@ -105,7 +113,7 @@ void SSTable::merge(std::vector<std::filesystem::path> inputs, const std::filesy
         if (cursor.valid())
             items.push({cursor.current().key, index});
     }
-    writer.finish();
+    addRecordToFile(outPath, records);
 }
 
 void SSTable::cleanupOrphanedTemps(const std::filesystem::path& dir)
@@ -133,24 +141,49 @@ void SSTable::cleanupOrphanedTemps(const std::filesystem::path& dir)
 
 SSTable::SSTable(std::filesystem::path path) : path(std::move(path))
 {
+    namespace fs = std::filesystem;
+    if (!fs::exists(this->path) || !fs::is_regular_file(this->path))
+        throw std::runtime_error("SSTable file is not a regular file: " + this->path.string());
+
+    std::ifstream ifs{this->path, std::ios::binary};
+    if (!ifs)
+        throw std::runtime_error("Could not open file: " + this->path.string());
+
+    ifs.seekg(-16, std::ios::end);
+
+    std::byte buf[16];
+    ifs.read(reinterpret_cast<char*>(buf), 16);
+
+    std::memcpy(&recordsSize, buf, sizeof(recordsSize));
+    std::memcpy(&bloomSize, buf + 8, sizeof(bloomSize));
+
+    ifs.seekg(recordsSize, std::ios::beg);
+    std::vector<std::byte> bloomBytes(bloomSize);
+    ifs.read(reinterpret_cast<char*>(bloomBytes.data()), bloomSize);
+    bloomFilter = std::make_unique<BloomFilter>(BloomFilter::fromBytes(bloomBytes));
 }
 
 Result SSTable::get(const std::string_view key, std::string &value) const
 {
-    if (!std::filesystem::exists(path))
+    if (!std::filesystem::exists(path) || !bloomFilter->mightContain(key))
         return Result::ABSENT;
 
     std::ifstream ifs{path, std::ios::binary};
     if (!ifs.is_open())
         return Result::ABSENT;
 
-    while (const auto curRecord = readOneRecord(ifs))
+    uint64_t pos = 0;
+    while (pos < recordsSize)
     {
-        if (curRecord->key == key)
+        auto record = readOneRecord(ifs);
+        if (!record)
+            break;
+        pos += getRecordSize(record);
+        if (record->key == key)
         {
-            if (curRecord->type != Type::VALUE)
+            if (record->type != Type::VALUE)
                 return Result::TOMBSTONE;
-            value = curRecord->value;
+            value = record->value;
             return Result::VALUE;
         }
     }
@@ -186,7 +219,28 @@ std::optional<Record> SSTable::readOneRecord(std::ifstream& ifs)
     return std::nullopt;
 }
 
-Cursor::Cursor(std::filesystem::path  path) : path(std::move(path))
+void SSTable::addRecordToFile(const std::filesystem::path& path, const std::vector<Record>& records)
+{
+    BloomFilter bloom_filter(records.size(), 0.01);
+    FileWriter writer(path);
+
+    uint64_t recordSize = 0;
+    for (const auto & [key, type, value] : records)
+    {
+        recordSize += writer.add({key, type, value});
+        bloom_filter.add(key);
+    }
+
+    const auto &bytes = BloomFilter::Serialize(bloom_filter);
+    writeAll(writer.getFd(), bytes.data(), bytes.size());
+    writeAll(writer.getFd(), &recordSize, sizeof(recordSize));
+
+    const auto bloomSize = bytes.size();
+    writeAll(writer.getFd(), &bloomSize, sizeof(bloomSize));
+    writer.finish();
+}
+
+Cursor::Cursor(std::filesystem::path path) : path(std::move(path))
 {
     if (!std::filesystem::exists(this->path))
         throw std::runtime_error("Invalid path");
@@ -195,7 +249,21 @@ Cursor::Cursor(std::filesystem::path  path) : path(std::move(path))
     if (!ifs.is_open())
         throw std::runtime_error("Failed to open SSTable file!");
 
-    currentRecord = SSTable::readOneRecord(ifs);
+    ifs.seekg(-16, std::ios::end);
+
+    std::byte buf[16];
+    ifs.read(reinterpret_cast<char*>(buf), 16);
+
+    std::memcpy(&recordsSize, buf, sizeof(recordsSize));
+    std::memcpy(&bloomSize, buf + 8, sizeof(bloomSize));
+
+    ifs.seekg(0, std::ios::beg);
+
+    if (currentPos < recordsSize)
+    {
+        currentRecord = SSTable::readOneRecord(ifs);
+        currentPos += getRecordSize(currentRecord);
+    }
 }
 
 bool Cursor::valid() const
@@ -211,6 +279,10 @@ const Record& Cursor::current() const
 
 void Cursor::advance()
 {
-    if (valid())
+    if (valid() && currentPos < recordsSize)
+    {
         currentRecord = SSTable::readOneRecord(ifs);
+        currentPos += getRecordSize(currentRecord);
+    } else
+        currentRecord = std::nullopt;
 }

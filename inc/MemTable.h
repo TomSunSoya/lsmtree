@@ -19,6 +19,7 @@ public:
     bool put(const std::string &key, const std::string &value);
     Result get(std::string_view key, std::string &value) const;
     bool remove(const std::string &key);
+    [[nodiscard]] size_t size() const;
 
     using const_iterator = std::map<std::string, Entry, std::less<>>::const_iterator;
     [[nodiscard]] const_iterator begin() const noexcept { return table.begin(); }
@@ -27,17 +28,17 @@ public:
     [[nodiscard]] size_t size_bytes() const;
 
 private:
-    struct FileWriter
+    struct WALFileWriter
     {
         std::filesystem::path path;
         int fd = -1;
         bool poisoned = false;
 
-        explicit FileWriter(std::string_view logPath);
-        FileWriter(const FileWriter &other) = delete;
-        ~FileWriter() {::close(fd);};
+        explicit WALFileWriter(std::string_view logPath);
+        WALFileWriter(const WALFileWriter &other) = delete;
+        ~WALFileWriter() {::close(fd);};
 
-        FileWriter &operator=(const FileWriter &other) = delete;
+        WALFileWriter &operator=(const WALFileWriter &other) = delete;
 
         void write(const std::string &record);
         int truncate(size_t offset);
@@ -45,7 +46,7 @@ private:
 
     std::map<std::string, Entry, std::less<>> table;
     const std::filesystem::path log_path;
-    FileWriter writer;
+    WALFileWriter writer;
     size_t current_size;
 
     void putToWAL(const std::string &key, const std::string &value, const Type type);

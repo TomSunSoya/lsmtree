@@ -89,12 +89,17 @@ bool MemTable::remove(const std::string &key)
     return true;
 }
 
+size_t MemTable::size() const
+{
+    return table.size();
+}
+
 size_t MemTable::size_bytes() const
 {
     return current_size;
 }
 
-MemTable::FileWriter::FileWriter(const std::string_view logPath) : path(logPath), poisoned(false)
+MemTable::WALFileWriter::WALFileWriter(const std::string_view logPath) : path(logPath), poisoned(false)
 {
     if (const auto parentPath = path.parent_path(); !parentPath.empty())
     {
@@ -113,7 +118,7 @@ MemTable::FileWriter::FileWriter(const std::string_view logPath) : path(logPath)
         throw std::runtime_error("Failed to open file for writing");
 }
 
-void MemTable::FileWriter::write(const std::string &record)
+void MemTable::WALFileWriter::write(const std::string &record)
 {
     if (poisoned)
         throw std::runtime_error("File is poisoned");
@@ -133,7 +138,7 @@ void MemTable::FileWriter::write(const std::string &record)
     }
 }
 
-int MemTable::FileWriter::truncate(const size_t offset)
+int MemTable::WALFileWriter::truncate(const size_t offset)
 {
     if (::ftruncate(fd, static_cast<off_t>(offset)) == 0)
         return 0;

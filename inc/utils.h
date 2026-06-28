@@ -132,7 +132,7 @@ class FileWriter
 {
 public:
     explicit FileWriter(std::filesystem::path path);
-    void add(const Record &);
+    uint64_t add(const Record &);
     void finish();
     [[nodiscard]] int getFd() const;
 

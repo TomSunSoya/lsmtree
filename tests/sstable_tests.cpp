@@ -80,16 +80,6 @@ std::string hexDump(std::string_view content)
     return out.str();
 }
 
-void expectFileHexDump(const std::filesystem::path &path, const std::string &expected)
-{
-    std::string content;
-    readFile(path, content);
-    if (::testing::Test::HasFatalFailure())
-        return;
-
-    EXPECT_EQ(expected, hexDump(content)) << "unexpected file bytes in " << path;
-}
-
 void expectRecord(const Record &record, const std::string &key, const Type type, const std::string &value)
 {
     EXPECT_EQ(key, record.key);
@@ -252,10 +242,11 @@ TEST(SSTableTest, ParseNumberedFileAcceptsOnlyExactNumericMiddle)
     EXPECT_FALSE(parseNumberedFile("sst_12.sst.tmp", "sst_", ".sst"));
 }
 
-TEST(SSTableTest, BuildWritesExpectedLittleEndianBytes)
+TEST(SSTableTest, BuildWritesExpectedLittleEndianRecordPrefix)
 {
     const std::filesystem::path walPath("sstable_tests_exact_bytes.wal");
     const std::filesystem::path sstablePath("sstable_tests_exact_bytes.sst");
+    constexpr size_t expectedRecordsSize = 25;
     std::filesystem::remove(walPath);
     std::filesystem::remove(sstablePath);
 
@@ -270,10 +261,11 @@ TEST(SSTableTest, BuildWritesExpectedLittleEndianBytes)
     std::string content;
     ASSERT_NO_FATAL_FAILURE(readFile(sstablePath, content));
 
+    ASSERT_GE(content.size(), expectedRecordsSize);
     EXPECT_EQ(
         "00 01 00 00 00 02 00 00 00 61 78 79 "
         "00 04 00 00 00 00 00 00 00 6c 6f 6e 67",
-        hexDump(content));
+        hexDump(std::string_view(content).substr(0, expectedRecordsSize)));
 
     std::filesystem::remove(sstablePath);
     std::filesystem::remove(walPath);
@@ -321,9 +313,6 @@ TEST(SSTableTest, BuildDoesNotLeaveTemporaryFileAfterSuccess)
 
     ASSERT_TRUE(std::filesystem::exists(sstablePath));
     EXPECT_FALSE(std::filesystem::exists(tempPath)) << "successful build should publish by rename and leave no .tmp file";
-    ASSERT_NO_FATAL_FAILURE(expectFileHexDump(
-        sstablePath,
-        "00 06 00 00 00 05 00 00 00 73 74 61 62 6c 65 74 61 62 6c 65"));
 
     const SSTable sstable(sstablePath);
     ASSERT_NO_FATAL_FAILURE(expectGet(sstable, "stable", "table"));
@@ -352,9 +341,6 @@ TEST(SSTableTest, BuildOverwritesStaleTemporaryFile)
 
     ASSERT_TRUE(std::filesystem::exists(sstablePath));
     EXPECT_FALSE(std::filesystem::exists(tempPath)) << "stale .tmp file should be consumed by the successful build";
-    ASSERT_NO_FATAL_FAILURE(expectFileHexDump(
-        sstablePath,
-        "00 05 00 00 00 05 00 00 00 66 72 65 73 68 76 61 6c 75 65"));
 
     const SSTable sstable(sstablePath);
     ASSERT_NO_FATAL_FAILURE(expectGet(sstable, "fresh", "value"));
@@ -383,9 +369,8 @@ TEST(SSTableTest, BuildRejectsExistingFileWithoutOverwriting)
         ASSERT_NO_THROW(SSTable::build(memTable, sstablePath));
     }
 
-    ASSERT_NO_FATAL_FAILURE(expectFileHexDump(
-        sstablePath,
-        "00 08 00 00 00 05 00 00 00 6f 72 69 67 69 6e 61 6c 76 61 6c 75 65"));
+    std::string originalContent;
+    ASSERT_NO_FATAL_FAILURE(readFile(sstablePath, originalContent));
 
     {
         MemTable memTable(replacementWalPath.string());
@@ -395,9 +380,12 @@ TEST(SSTableTest, BuildRejectsExistingFileWithoutOverwriting)
     }
 
     EXPECT_FALSE(std::filesystem::exists(tempPath)) << "rejecting an existing target should not publish or leave a .tmp file";
-    ASSERT_NO_FATAL_FAILURE(expectFileHexDump(
-        sstablePath,
-        "00 08 00 00 00 05 00 00 00 6f 72 69 67 69 6e 61 6c 76 61 6c 75 65"));
+    std::string contentAfterRejectedBuild;
+    ASSERT_NO_FATAL_FAILURE(readFile(sstablePath, contentAfterRejectedBuild));
+    EXPECT_EQ(originalContent, contentAfterRejectedBuild);
+
+    const SSTable sstable(sstablePath);
+    ASSERT_NO_FATAL_FAILURE(expectGet(sstable, "original", "value"));
 
     std::filesystem::remove(tempPath);
     std::filesystem::remove(sstablePath);
@@ -516,9 +504,9 @@ TEST(SSTableTest, CleanupOrphanedTempsKeepsSSTableFiles)
 
     EXPECT_FALSE(std::filesystem::exists(tempPath));
     ASSERT_TRUE(std::filesystem::exists(sstablePath));
-    ASSERT_NO_FATAL_FAILURE(expectFileHexDump(
-        sstablePath,
-        "00 04 00 00 00 02 00 00 00 6b 65 65 70 6d 65"));
+
+    const SSTable sstable(sstablePath);
+    ASSERT_NO_FATAL_FAILURE(expectGet(sstable, "keep", "me"));
 
     std::filesystem::remove_all(root);
     std::filesystem::remove(walPath);
@@ -564,11 +552,10 @@ TEST(SSTableTest, PreservesDelimiterAndEmptyFields)
     std::filesystem::remove(walPath);
 }
 
-TEST(SSTableTest, MissingFileReadsAsEmptyTable)
+TEST(SSTableTest, ConstructorRejectsMissingFile)
 {
     const std::filesystem::path sstablePath("sstable_tests_missing.sst");
     std::filesystem::remove(sstablePath);
 
-    const SSTable sstable(sstablePath);
-    expectMissing(sstable, "missing");
+    EXPECT_THROW(SSTable sstable(sstablePath), std::runtime_error);
 }
