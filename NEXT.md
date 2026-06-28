@@ -1,1 +1,1 @@
-DB::compact() 全量合并：把 manifest 当前所有活跃 SSTable 用 merge 合成一个新 SSTable(号从 allocateNumber),manifest.replaceTables+save 原子提交,再删输入文件。先做显式 compact(),不接自动触发。附测试:put 多批+多次 flush 造出多个 sst → compact() → 活跃表降为 1、所有 key 读得到、被覆盖的旧值/被删 key 语义正确、重开数据不变。
+单机LSM基本完成

@@ -31,31 +31,6 @@ namespace
         const auto number = parseSSTableNumber(path);
         return number.value_or(0);
     }
-
-    std::vector<fs::path> sortedSSTablePaths(const fs::path& dir)
-    {
-        if (!fs::exists(dir) || !fs::is_directory(dir))
-            throw std::runtime_error("SSTable directory must exist!");
-
-        std::vector<fs::path> paths;
-        for (std::error_code ec; const auto &entry : fs::directory_iterator(dir, ec))
-        {
-            if (ec)
-                throw std::runtime_error(entry.path().string() + ": " + ec.message());
-            if (!entry.is_regular_file(ec))
-                continue;
-
-            if (const auto& path = entry.path(); path.extension() == kSSTableSuffix)
-                paths.push_back(path);
-        }
-
-        std::ranges::sort(paths, [] (const fs::path &a, const fs::path &b)
-        {
-            return sstableNumberOrZero(a) < sstableNumberOrZero(b);
-        });
-
-        return paths;
-    }
 }
 
 void SSTable::build(const MemTable &mt, const std::filesystem::path &path)
@@ -72,12 +47,15 @@ void SSTable::build(const MemTable &mt, const std::filesystem::path &path)
     writer.finish();
 }
 
-void SSTable::merge(const std::filesystem::path& inputs, const std::filesystem::path& outPath)
+void SSTable::merge(std::vector<std::filesystem::path> inputs, const std::filesystem::path& outPath)
 {
-    const auto sortedPaths = sortedSSTablePaths(inputs);
+    std::ranges::sort(inputs, [] (const fs::path &a, const fs::path &b)
+    {
+        return sstableNumberOrZero(a) < sstableNumberOrZero(b);
+    });
 
     std::vector<Cursor> cursors;
-    std::ranges::transform(sortedPaths, std::back_inserter(cursors), [] (const fs::path &path)
+    std::ranges::transform(inputs, std::back_inserter(cursors), [] (const fs::path &path)
     {
         return Cursor{path};
     });

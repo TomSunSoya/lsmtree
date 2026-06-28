@@ -7,6 +7,7 @@
 #include <gtest/gtest.h>
 
 #include "DB.h"
+#include "SSTable.h"
 
 namespace
 {
@@ -608,6 +609,161 @@ TEST(DBTest, NewerFlushedSSTableWinsForDuplicateKey)
         ASSERT_NO_THROW(db.flush());
 
         ASSERT_NO_FATAL_FAILURE(expectGet(db, "key", "new"));
+    }
+
+    std::filesystem::remove_all(root);
+}
+
+TEST(DBTest, CompactPersistsMergedTableAcrossReopen)
+{
+    const std::filesystem::path root("db_tests_compact_persists_manifest");
+    const std::filesystem::path firstInput = root / "sstable" / "sst_0.sst";
+    const std::filesystem::path secondInput = root / "sstable" / "sst_2.sst";
+    const std::filesystem::path compactedOutput = root / "sstable" / "sst_4.sst";
+    std::filesystem::remove_all(root);
+
+    {
+        DB db(root, kManualFlushThreshold);
+
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "alpha", "one"));
+        ASSERT_NO_THROW(db.flush());
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "beta", "two"));
+        ASSERT_NO_THROW(db.flush());
+
+        ASSERT_NO_THROW(db.compact());
+
+        EXPECT_FALSE(std::filesystem::exists(firstInput));
+        EXPECT_FALSE(std::filesystem::exists(secondInput));
+        EXPECT_TRUE(std::filesystem::is_regular_file(compactedOutput));
+    }
+
+    {
+        const DB db(root, kManualFlushThreshold);
+
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "alpha", "one"));
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "beta", "two"));
+        EXPECT_TRUE(std::filesystem::is_regular_file(compactedOutput));
+    }
+
+    std::filesystem::remove_all(root);
+}
+
+TEST(DBTest, CompactIgnoresOrphanedSSTableThatWouldResurrectDeletedKey)
+{
+    const std::filesystem::path root("db_tests_compact_ignores_orphan");
+    const std::filesystem::path orphanWalPath = root / "orphan.wal";
+    const std::filesystem::path orphanSSTablePath = root / "sstable" / "sst_999.sst";
+    std::filesystem::remove_all(root);
+
+    {
+        DB db(root, kManualFlushThreshold);
+
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "deleted", "original"));
+        ASSERT_NO_THROW(db.flush());
+        ASSERT_NO_FATAL_FAILURE(expectRemove(db, "deleted"));
+        ASSERT_NO_THROW(db.flush());
+
+        {
+            MemTable orphan(orphanWalPath.string());
+            ASSERT_TRUE(orphan.put("deleted", "orphan-value"));
+            ASSERT_NO_THROW(SSTable::build(orphan, orphanSSTablePath));
+        }
+        ASSERT_TRUE(std::filesystem::is_regular_file(orphanSSTablePath));
+
+        ASSERT_NO_THROW(db.compact());
+
+        expectMissing(db, "deleted");
+    }
+
+    {
+        const DB db(root, kManualFlushThreshold);
+
+        expectMissing(db, "deleted");
+        EXPECT_FALSE(std::filesystem::exists(orphanSSTablePath));
+    }
+
+    std::filesystem::remove_all(root);
+}
+
+TEST(DBTest, CompactPreservesNewestValuesAndTombstonesAcrossReopen)
+{
+    const std::filesystem::path root("db_tests_compact_preserves_latest_records");
+    std::filesystem::remove_all(root);
+
+    {
+        DB db(root, kManualFlushThreshold);
+
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "updated", "old"));
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "deleted", "old"));
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "stable", "kept"));
+        ASSERT_NO_THROW(db.flush());
+
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "updated", "new"));
+        ASSERT_NO_FATAL_FAILURE(expectRemove(db, "deleted"));
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "new-key", "new-value"));
+        ASSERT_NO_THROW(db.flush());
+
+        ASSERT_NO_THROW(db.compact());
+
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "updated", "new"));
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "stable", "kept"));
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "new-key", "new-value"));
+        expectMissing(db, "deleted");
+    }
+
+    {
+        const DB db(root, kManualFlushThreshold);
+
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "updated", "new"));
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "stable", "kept"));
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "new-key", "new-value"));
+        expectMissing(db, "deleted");
+    }
+
+    std::filesystem::remove_all(root);
+}
+
+TEST(DBTest, FlushAutoCompactsOnlyAfterTableCountExceedsThreshold)
+{
+    const std::filesystem::path root("db_tests_flush_auto_compacts");
+    const std::filesystem::path firstInput = root / "sstable" / "sst_0.sst";
+    const std::filesystem::path secondInput = root / "sstable" / "sst_2.sst";
+    const std::filesystem::path thirdInput = root / "sstable" / "sst_4.sst";
+    const std::filesystem::path compactedOutput = root / "sstable" / "sst_6.sst";
+    constexpr uint64_t compactThreshold = 2;
+    std::filesystem::remove_all(root);
+
+    {
+        DB db(root, kManualFlushThreshold, compactThreshold);
+
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "first", "one"));
+        ASSERT_NO_THROW(db.flush());
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "second", "two"));
+        ASSERT_NO_THROW(db.flush());
+
+        EXPECT_TRUE(std::filesystem::is_regular_file(firstInput));
+        EXPECT_TRUE(std::filesystem::is_regular_file(secondInput));
+        EXPECT_FALSE(std::filesystem::exists(compactedOutput));
+
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "third", "three"));
+        ASSERT_NO_THROW(db.flush());
+
+        EXPECT_FALSE(std::filesystem::exists(firstInput));
+        EXPECT_FALSE(std::filesystem::exists(secondInput));
+        EXPECT_FALSE(std::filesystem::exists(thirdInput));
+        EXPECT_TRUE(std::filesystem::is_regular_file(compactedOutput));
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "first", "one"));
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "second", "two"));
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "third", "three"));
+    }
+
+    {
+        const DB db(root, kManualFlushThreshold, compactThreshold);
+
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "first", "one"));
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "second", "two"));
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "third", "three"));
+        EXPECT_TRUE(std::filesystem::is_regular_file(compactedOutput));
     }
 
     std::filesystem::remove_all(root);

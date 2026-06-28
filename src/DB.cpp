@@ -83,7 +83,7 @@ namespace
     }
 }
 
-DB::DB(const std::filesystem::path& data_dir, const uint64_t threshold_) : threshold(threshold_)
+DB::DB(const std::filesystem::path& data_dir, const uint64_t threshold_, const uint64_t compactThreshold_) : threshold(threshold_), compactThreshold(compactThreshold_)
 {
     namespace fs = std::filesystem;
     if (!fs::exists(data_dir))
@@ -155,9 +155,34 @@ void DB::flush()
     walFilePath = newWalFilePath;
 
     removeFile(oldWalFilePath, "remove wal file failed");
+
+    if (manifest->tables().size() > compactThreshold)
+        compact();
 }
 
-bool DB::searchFromSSTable(std::string_view key, std::string& value) const
+void DB::compact()
+{
+    namespace fs = std::filesystem;
+    const fs::path inputPath = data_dir / "sstable";
+    const auto outFileNumber = manifest->allocateNumber();
+    const std::vector removed(manifest->tables().begin(), manifest->tables().end());
+    const fs::path outPath = inputPath / std::format("sst_{}.sst", outFileNumber);
+
+    std::vector<fs::path> inputFiles;
+    for (const auto index : manifest->tables())
+        inputFiles.emplace_back(inputPath / std::format("sst_{}.sst", index));
+
+    SSTable::merge(inputFiles, outPath);
+    manifest->replaceTables(removed, outFileNumber);
+    manifest->save();
+
+    for (const auto &oldFilePath : inputFiles)
+    {
+        removeFile(oldFilePath, "remove old sst file failed");
+    }
+}
+
+bool DB::searchFromSSTable(const std::string_view key, std::string& value) const
 {
     for (const auto index : manifest->tables())
     {
