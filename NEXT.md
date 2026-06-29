@@ -1,1 +1,1 @@
-下一步：让 SSTable::get() 二分稀疏索引定位候选 block，并补多 block 验证测试，覆盖首/中/末块命中、块间边界和缺失 key，一步完成“用索引”和“验证索引”。
+实现 range scan:把 MemTable + 所有 SSTable 合并成一个有序迭代器(新盖旧、跳过 tombstone),复用 Cursor 和 k 路归并。第一步先想清楚:多个源里同一个 key 出现多次,迭代器怎么保证只吐最新的那条?

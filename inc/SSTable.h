@@ -20,10 +20,14 @@ private:
     std::filesystem::path path;
     uint64_t recordsSize{}, bloomSize{}, indexSize{};
     std::unique_ptr<BloomFilter> bloomFilter{};
+
+    [[nodiscard]] std::optional<std::pair<Index, uint64_t>> getBlock(std::string_view key) const;
+
     friend class Cursor;
     static constexpr size_t BLOCK_SIZE = 4 * 1024;
 
     static std::optional<Record> readOneRecord(std::ifstream &ifs);
+    static std::optional<Index> readOneIndex(std::ifstream &ifs);
     static void addRecordToFile(const std::filesystem::path &path, const std::vector<Record> &records);
 };
 

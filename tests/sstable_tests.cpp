@@ -1,3 +1,5 @@
+#include <array>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -15,6 +17,11 @@
 
 namespace
 {
+std::string multiBlockKey(const size_t index)
+{
+    return "key-" + std::string(index < 10 ? "0" : "") + std::to_string(index);
+}
+
 void expectPut(MemTable &table, const std::string &key, const std::string &value)
 {
     ASSERT_TRUE(table.put(key, value)) << "expected put to succeed for key: " << key;
@@ -550,6 +557,144 @@ TEST(SSTableTest, PreservesDelimiterAndEmptyFields)
 
     std::filesystem::remove(sstablePath);
     std::filesystem::remove(walPath);
+}
+
+TEST(SSTableTest, SparseIndexLocatesKeysAcrossMultipleBlocks)
+{
+    const std::filesystem::path root("sstable_tests_sparse_index_blocks");
+    const ScopedPathCleanup cleanup(root);
+    const std::filesystem::path walPath = root / "source.wal";
+    const std::filesystem::path sstablePath = root / "table.sst";
+    constexpr size_t entryCount = 12;
+    constexpr size_t valueSize = 1'500;
+    constexpr uint64_t recordSize = 9 + 6 + valueSize;
+    std::filesystem::create_directories(root);
+
+    {
+        MemTable memTable(walPath.string());
+        for (size_t i = 0; i < entryCount; ++i)
+            ASSERT_NO_FATAL_FAILURE(expectPut(memTable, multiBlockKey(i), std::string(valueSize, 'a' + i)));
+
+        ASSERT_NO_THROW(SSTable::build(memTable, sstablePath));
+    }
+
+    std::ifstream in(sstablePath, std::ios::binary);
+    ASSERT_TRUE(in.is_open());
+    in.seekg(-24, std::ios::end);
+
+    uint64_t recordsSize = 0;
+    uint64_t bloomSize = 0;
+    uint64_t indexSize = 0;
+    ASSERT_TRUE(in.read(reinterpret_cast<char*>(&recordsSize), sizeof(recordsSize)));
+    ASSERT_TRUE(in.read(reinterpret_cast<char*>(&bloomSize), sizeof(bloomSize)));
+    ASSERT_TRUE(in.read(reinterpret_cast<char*>(&indexSize), sizeof(indexSize)));
+
+    EXPECT_EQ(entryCount * recordSize, recordsSize);
+    EXPECT_EQ(4 * (sizeof(uint32_t) + 6 + sizeof(uint64_t)), indexSize);
+
+    const std::array expectedIndices{
+        std::pair{multiBlockKey(0), uint64_t{0}},
+        std::pair{multiBlockKey(3), 3 * recordSize},
+        std::pair{multiBlockKey(6), 6 * recordSize},
+        std::pair{multiBlockKey(9), 9 * recordSize},
+    };
+    in.seekg(recordsSize + bloomSize, std::ios::beg);
+    for (const auto &[expectedKey, expectedOffset] : expectedIndices)
+    {
+        uint32_t keySize = 0;
+        uint64_t offset = 0;
+        ASSERT_TRUE(in.read(reinterpret_cast<char*>(&keySize), sizeof(keySize)));
+        std::string key(keySize, '\0');
+        ASSERT_TRUE(in.read(key.data(), keySize));
+        ASSERT_TRUE(in.read(reinterpret_cast<char*>(&offset), sizeof(offset)));
+
+        EXPECT_EQ(expectedKey, key);
+        EXPECT_EQ(expectedOffset, offset);
+    }
+
+    const SSTable sstable(sstablePath);
+    for (const size_t index : {0, 2, 3, 6, 9, 11})
+    {
+        ASSERT_NO_FATAL_FAILURE(expectGet(
+            sstable,
+            multiBlockKey(index),
+            std::string(valueSize, 'a' + index)));
+    }
+    expectMissing(sstable, "key-025");
+    expectMissing(sstable, "key-z");
+
+    BloomFilter mirrorFilter(entryCount, 0.01);
+    for (size_t i = 0; i < entryCount; ++i)
+        mirrorFilter.add(multiBlockKey(i));
+
+    std::string falsePositiveBeforeFirst;
+    for (size_t i = 0; i < 100'000 && falsePositiveBeforeFirst.empty(); ++i)
+    {
+        auto candidate = "aaa-" + std::to_string(i);
+        if (mirrorFilter.mightContain(candidate))
+            falsePositiveBeforeFirst = std::move(candidate);
+    }
+
+    ASSERT_FALSE(falsePositiveBeforeFirst.empty());
+    ASSERT_LT(falsePositiveBeforeFirst, multiBlockKey(0));
+    expectMissing(sstable, falsePositiveBeforeFirst);
+}
+
+TEST(SSTableTest, SparseIndexPreservesTombstoneInLaterBlock)
+{
+    const std::filesystem::path root("sstable_tests_sparse_index_tombstone");
+    const ScopedPathCleanup cleanup(root);
+    const std::filesystem::path walPath = root / "source.wal";
+    const std::filesystem::path sstablePath = root / "table.sst";
+    constexpr size_t entryCount = 12;
+    constexpr size_t valueSize = 1'500;
+    std::filesystem::create_directories(root);
+
+    {
+        MemTable memTable(walPath.string());
+        for (size_t i = 0; i < entryCount; ++i)
+            ASSERT_NO_FATAL_FAILURE(expectPut(memTable, multiBlockKey(i), std::string(valueSize, 'a' + i)));
+        ASSERT_TRUE(memTable.remove(multiBlockKey(7)));
+
+        ASSERT_NO_THROW(SSTable::build(memTable, sstablePath));
+    }
+
+    const SSTable sstable(sstablePath);
+    ASSERT_NO_FATAL_FAILURE(expectGet(sstable, multiBlockKey(6), std::string(valueSize, 'a' + 6)));
+    ASSERT_NO_FATAL_FAILURE(expectTombstone(sstable, multiBlockKey(7)));
+    ASSERT_NO_FATAL_FAILURE(expectGet(sstable, multiBlockKey(8), std::string(valueSize, 'a' + 8)));
+}
+
+TEST(SSTableTest, SparseIndexStopsAtDeclaredSizeBeforeFooter)
+{
+    const std::filesystem::path root("sstable_tests_sparse_index_footer_boundary");
+    const ScopedPathCleanup cleanup(root);
+    const std::filesystem::path walPath = root / "source.wal";
+    const std::filesystem::path sstablePath = root / "table.sst";
+    std::filesystem::create_directories(root);
+
+    {
+        MemTable memTable(walPath.string());
+        ASSERT_NO_FATAL_FAILURE(expectPut(memTable, "zzz", ""));
+        ASSERT_NO_THROW(SSTable::build(memTable, sstablePath));
+    }
+
+    std::ifstream in(sstablePath, std::ios::binary);
+    ASSERT_TRUE(in.is_open());
+    in.seekg(-24, std::ios::end);
+
+    uint64_t recordsSize = 0;
+    uint64_t bloomSize = 0;
+    uint64_t indexSize = 0;
+    ASSERT_TRUE(in.read(reinterpret_cast<char*>(&recordsSize), sizeof(recordsSize)));
+    ASSERT_TRUE(in.read(reinterpret_cast<char*>(&bloomSize), sizeof(bloomSize)));
+    ASSERT_TRUE(in.read(reinterpret_cast<char*>(&indexSize), sizeof(indexSize)));
+    EXPECT_EQ(12, recordsSize);
+    EXPECT_GT(bloomSize, 0);
+    EXPECT_EQ(sizeof(uint32_t) + 3 + sizeof(uint64_t), indexSize);
+
+    const SSTable sstable(sstablePath);
+    ASSERT_NO_FATAL_FAILURE(expectGet(sstable, "zzz", ""));
 }
 
 TEST(SSTableTest, ConstructorRejectsMissingFile)
