@@ -3,7 +3,7 @@
 #include "BloomFilter.h"
 #include "MemTable.h"
 
-class Cursor;
+class SSTableIterator;
 
 class SSTable
 {
@@ -23,7 +23,7 @@ private:
 
     [[nodiscard]] std::optional<std::pair<Index, uint64_t>> getBlock(std::string_view key) const;
 
-    friend class Cursor;
+    friend class SSTableIterator;
     static constexpr size_t BLOCK_SIZE = 4 * 1024;
 
     static std::optional<Record> readOneRecord(std::ifstream &ifs);
@@ -31,14 +31,14 @@ private:
     static void addRecordToFile(const std::filesystem::path &path, const std::vector<Record> &records);
 };
 
-class Cursor
+class SSTableIterator : public Iterator
 {
 public:
-    explicit Cursor(std::filesystem::path path);
+    explicit SSTableIterator(std::filesystem::path path);
 
-    bool valid() const;
-    const Record &current() const;
-    void advance();
+    bool valid() const override;
+    const Record &current() const override;
+    void advance() override;
 
 private:
     std::filesystem::path path;

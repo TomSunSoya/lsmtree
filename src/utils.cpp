@@ -2,6 +2,7 @@
 
 #include <filesystem>
 #include <fcntl.h>
+#include <queue>
 
 FileWriter::FileWriter(std::filesystem::path path) : path_(std::move(path)), dataFd(-1)
 {
@@ -64,4 +65,56 @@ void FileWriter::finish()
 int FileWriter::getFd() const
 {
     return dataFd.get();
+}
+
+std::vector<Record> mergeSorted(std::vector<std::unique_ptr<Iterator>> sources)
+{
+    std::vector<Record> result;
+    struct MergeItem
+    {
+        std::string key;
+        int index;
+
+        bool operator<(const MergeItem &other) const
+        {
+            if (key != other.key)
+                return key > other.key;
+            return index > other.index;
+        }
+    };
+
+    std::priority_queue<MergeItem> queues;
+    for (int i = 0; i < sources.size(); ++i)
+    {
+        if (sources[i] && sources[i]->valid())
+        {
+            const auto &source = sources[i]->current();
+            queues.emplace(source.key, i);
+        }
+    }
+
+    while (!queues.empty())
+    {
+        auto item = queues.top();
+        queues.pop();
+
+        while (!queues.empty() && queues.top().key == item.key)
+        {
+            const auto [key, index] = queues.top();
+            queues.pop();
+            sources[index]->advance();
+            if (sources[index]->valid())
+            {
+                auto &curRecord = sources[index]->current();
+                queues.emplace(curRecord.key, index);
+            }
+        }
+
+        const auto &curIt = sources[item.index];
+        result.push_back(curIt->current());
+        curIt->advance();
+        if (curIt->valid())
+            queues.emplace(curIt->current().key, item.index);
+    }
+    return result;
 }

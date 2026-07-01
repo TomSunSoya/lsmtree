@@ -5,6 +5,7 @@
 #include <string>
 #include <system_error>
 #include <unistd.h>
+#include <vector>
 
 enum class Type : uint8_t
 {
@@ -146,3 +147,14 @@ private:
     std::filesystem::path path_, tempPath, parentDir;
     FdGuard dataFd;
 };
+
+class Iterator
+{
+public:
+    virtual ~Iterator() = default;
+    [[nodiscard]] virtual bool valid() const = 0;
+    [[nodiscard]] virtual const Record &current() const = 0;
+    virtual void advance() = 0;
+};
+
+std::vector<Record> mergeSorted(std::vector<std::unique_ptr<Iterator>> sources);

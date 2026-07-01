@@ -15,6 +15,7 @@ public:
     bool remove(const std::string &key);
     void flush();
     void compact();
+    std::vector<Record> scan(std::string_view start, std::string_view end) const;
 
 private:
     std::unique_ptr<MemTable> actMemTable;

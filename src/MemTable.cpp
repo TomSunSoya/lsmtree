@@ -250,3 +250,41 @@ std::vector<std::pair<std::string, Entry>> MemTable::parseWALRecord(std::string_
     lastGoodOffset = pos;
     return records;
 }
+
+MemTableIterator::MemTableIterator(const MemTable& mt) : currentIt(mt.begin()), endIt(mt.end())
+{
+    if (currentIt != endIt)
+    {
+        Record record;
+        record.key = currentIt->first;
+        record.value = currentIt->second.value;
+        record.type = currentIt->second.type;
+        currentRecord = std::move(record);
+    }
+}
+
+bool MemTableIterator::valid() const
+{
+    return currentRecord.has_value();
+}
+
+const Record& MemTableIterator::current() const
+{
+    assert(valid());
+    return *currentRecord;
+}
+
+void MemTableIterator::advance()
+{
+    ++currentIt;
+    if (currentIt != endIt)
+    {
+        Record record;
+        record.key = currentIt->first;
+        record.value = currentIt->second.value;
+        record.type = currentIt->second.type;
+        currentRecord = std::move(record);
+    }
+    else
+        currentRecord.reset();
+}

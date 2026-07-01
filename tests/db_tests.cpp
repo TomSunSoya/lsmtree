@@ -3,6 +3,9 @@
 #include <iterator>
 #include <limits>
 #include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
 
 #include <gtest/gtest.h>
 
@@ -34,6 +37,22 @@ void expectMissing(const DB &db, const std::string &key)
 {
     std::string actual = "unchanged";
     EXPECT_FALSE(db.get(key, actual)) << "expected key to be missing: " << key;
+}
+
+void expectScanValues(
+    const DB &db,
+    const std::string_view start,
+    const std::string_view end,
+    const std::vector<std::pair<std::string, std::string>> &expected)
+{
+    const auto records = db.scan(start, end);
+    ASSERT_EQ(expected.size(), records.size());
+    for (size_t i = 0; i < expected.size(); ++i)
+    {
+        EXPECT_EQ(expected[i].first, records[i].key) << "record index: " << i;
+        EXPECT_EQ(Type::VALUE, records[i].type) << "record index: " << i;
+        EXPECT_EQ(expected[i].second, records[i].value) << "record index: " << i;
+    }
 }
 
 void writeFile(const std::filesystem::path &path, const std::string &content)
@@ -764,6 +783,100 @@ TEST(DBTest, FlushAutoCompactsOnlyAfterTableCountExceedsThreshold)
         ASSERT_NO_FATAL_FAILURE(expectGet(db, "second", "two"));
         ASSERT_NO_FATAL_FAILURE(expectGet(db, "third", "three"));
         EXPECT_TRUE(std::filesystem::is_regular_file(compactedOutput));
+    }
+
+    std::filesystem::remove_all(root);
+}
+
+TEST(DBTest, ScanReturnsSortedHalfOpenRangeFromActiveMemTable)
+{
+    const std::filesystem::path root("db_tests_scan_active_memtable");
+    std::filesystem::remove_all(root);
+
+    {
+        DB db(root, kManualFlushThreshold);
+        ASSERT_NO_FATAL_FAILURE(expectScanValues(db, "", "~", {}));
+
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "gamma", "three"));
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "alpha", "one"));
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "delta", "four"));
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "beta", "two"));
+
+        ASSERT_NO_FATAL_FAILURE(expectScanValues(
+            db,
+            "beta",
+            "gamma",
+            {
+                {"beta", "two"},
+                {"delta", "four"},
+            }));
+        ASSERT_NO_FATAL_FAILURE(expectScanValues(db, "gamma", "gamma", {}));
+        ASSERT_NO_FATAL_FAILURE(expectScanValues(db, "z", "a", {}));
+    }
+
+    std::filesystem::remove_all(root);
+}
+
+TEST(DBTest, ScanActiveMemTableOverridesSSTableAndOmitsDeletedKeys)
+{
+    const std::filesystem::path root("db_tests_scan_memtable_override");
+    std::filesystem::remove_all(root);
+
+    {
+        DB db(root, kManualFlushThreshold);
+
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "alpha", "old"));
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "deleted", "old"));
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "stable", "kept"));
+        ASSERT_NO_THROW(db.flush());
+
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "alpha", "new"));
+        ASSERT_NO_FATAL_FAILURE(expectRemove(db, "deleted"));
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "fresh", "value"));
+
+        ASSERT_NO_FATAL_FAILURE(expectScanValues(
+            db,
+            "",
+            "~",
+            {
+                {"alpha", "new"},
+                {"fresh", "value"},
+                {"stable", "kept"},
+            }));
+    }
+
+    std::filesystem::remove_all(root);
+}
+
+TEST(DBTest, ScanUsesNewestSSTableAndSurvivesReopen)
+{
+    const std::filesystem::path root("db_tests_scan_newest_sstable");
+    std::filesystem::remove_all(root);
+    const std::vector<std::pair<std::string, std::string>> expected{
+        {"alpha", "new"},
+        {"new-key", "new-value"},
+        {"stable", "kept"},
+    };
+
+    {
+        DB db(root, kManualFlushThreshold);
+
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "alpha", "old"));
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "deleted", "old"));
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "stable", "kept"));
+        ASSERT_NO_THROW(db.flush());
+
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "alpha", "new"));
+        ASSERT_NO_FATAL_FAILURE(expectRemove(db, "deleted"));
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "new-key", "new-value"));
+        ASSERT_NO_THROW(db.flush());
+
+        ASSERT_NO_FATAL_FAILURE(expectScanValues(db, "", "~", expected));
+    }
+
+    {
+        const DB db(root, kManualFlushThreshold);
+        ASSERT_NO_FATAL_FAILURE(expectScanValues(db, "", "~", expected));
     }
 
     std::filesystem::remove_all(root);

@@ -45,6 +45,18 @@ void expectTombstone(const MemTable &table, const std::string &key)
     EXPECT_EQ(Result::TOMBSTONE, table.get(key, actual)) << "expected tombstone for key: " << key;
 }
 
+void expectIteratorRecord(
+    const Iterator &iterator,
+    const std::string &key,
+    const Type type,
+    const std::string &value)
+{
+    ASSERT_TRUE(iterator.valid());
+    EXPECT_EQ(key, iterator.current().key);
+    EXPECT_EQ(type, iterator.current().type);
+    EXPECT_EQ(value, iterator.current().value);
+}
+
 void readFile(const std::filesystem::path &path, std::string &content)
 {
     std::ifstream in(path, std::ios::binary);
@@ -472,6 +484,66 @@ TEST(MemTableTest, WALRecordsEmptyAndMultiDigitLengths)
         expected += "P,0,=0,\n";
         ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, expected));
         ASSERT_NO_FATAL_FAILURE(expectGet(table, "", ""));
+    }
+
+    std::filesystem::remove(logPath);
+}
+
+TEST(MemTableTest, IteratorIsInvalidForEmptyTable)
+{
+    const std::filesystem::path logPath("memtable_tests_iterator_empty.wal");
+    std::filesystem::remove(logPath);
+
+    {
+        const MemTable table(logPath.string());
+        const MemTableIterator iterator(table);
+
+        EXPECT_FALSE(iterator.valid());
+    }
+
+    std::filesystem::remove(logPath);
+}
+
+TEST(MemTableTest, IteratorTraversesSortedValuesAndTombstonesThroughBaseInterface)
+{
+    const std::filesystem::path logPath("memtable_tests_iterator_records.wal");
+    std::filesystem::remove(logPath);
+
+    {
+        MemTable table(logPath.string());
+        ASSERT_NO_FATAL_FAILURE(expectPut(table, "gamma", "three"));
+        ASSERT_NO_FATAL_FAILURE(expectPut(table, "alpha", "one"));
+        ASSERT_NO_FATAL_FAILURE(expectPut(table, "beta", "two"));
+        ASSERT_NO_FATAL_FAILURE(expectRemove(table, "beta"));
+
+        MemTableIterator concreteIterator(table);
+        Iterator &iterator = concreteIterator;
+
+        ASSERT_NO_FATAL_FAILURE(expectIteratorRecord(iterator, "alpha", Type::VALUE, "one"));
+        iterator.advance();
+        ASSERT_NO_FATAL_FAILURE(expectIteratorRecord(iterator, "beta", Type::TOMBSTONE, ""));
+        iterator.advance();
+        ASSERT_NO_FATAL_FAILURE(expectIteratorRecord(iterator, "gamma", Type::VALUE, "three"));
+        iterator.advance();
+        EXPECT_FALSE(iterator.valid());
+    }
+
+    std::filesystem::remove(logPath);
+}
+
+TEST(MemTableTest, IteratorBecomesInvalidAfterLastRecord)
+{
+    const std::filesystem::path logPath("memtable_tests_iterator_past_end.wal");
+    std::filesystem::remove(logPath);
+
+    {
+        MemTable table(logPath.string());
+        ASSERT_NO_FATAL_FAILURE(expectPut(table, "only", "value"));
+
+        MemTableIterator iterator(table);
+        ASSERT_TRUE(iterator.valid());
+        iterator.advance();
+        EXPECT_FALSE(iterator.valid());
     }
 
     std::filesystem::remove(logPath);

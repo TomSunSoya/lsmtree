@@ -49,9 +49,24 @@ private:
     WALFileWriter writer;
     size_t current_size;
 
+    friend class MemTableIterator;
+
     void putToWAL(const std::string &key, const std::string &value, const Type type);
     bool restoreFromWAL();
     static std::vector<std::pair<std::string, Entry>> parseWALRecord(std::string_view content, size_t &lastGoodOffset);
+};
+
+class MemTableIterator : public Iterator
+{
+public:
+    explicit MemTableIterator(const MemTable &mt);
+    [[nodiscard]] bool valid() const override;
+    [[nodiscard]] const Record& current() const override;
+    void advance() override;
+
+private:
+    std::optional<Record> currentRecord;
+    MemTable::const_iterator currentIt, endIt;
 };
 
 

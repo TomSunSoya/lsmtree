@@ -1,5 +1,6 @@
 #include "DB.h"
 
+#include <algorithm>
 #include <cerrno>
 #include <filesystem>
 #include <format>
@@ -8,6 +9,7 @@
 #include <stdexcept>
 #include <string_view>
 #include <system_error>
+#include <ranges>
 
 #include "SSTable.h"
 
@@ -180,6 +182,28 @@ void DB::compact()
     {
         removeFile(oldFilePath, "remove old sst file failed");
     }
+}
+
+std::vector<Record> DB::scan(std::string_view start, std::string_view end) const
+{
+    std::vector<std::unique_ptr<Iterator>> iters;
+    iters.emplace_back(std::make_unique<MemTableIterator>(*actMemTable));
+
+    namespace fs = std::filesystem;
+    std::vector<fs::path> inputFiles;
+    for (const auto index : manifest->tables())
+        inputFiles.emplace_back(sstablePath(data_dir, index));
+
+    std::ranges::transform(inputFiles, std::back_inserter(iters), [](const fs::path &p)
+    {
+        return std::make_unique<SSTableIterator>(p.string());
+    });
+
+    auto finalResult = mergeSorted(std::move(iters)) | std::ranges::views::filter([&start, &end](const Record &record)
+    {
+        return record.key >= start && record.key < end && record.type == Type::VALUE;
+    });
+    return std::ranges::to<std::vector>(finalResult);
 }
 
 bool DB::searchFromSSTable(const std::string_view key, std::string& value) const

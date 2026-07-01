@@ -87,7 +87,7 @@ void SSTable::merge(std::vector<std::filesystem::path> inputs, const std::filesy
         return sstableNumberOrZero(a) < sstableNumberOrZero(b);
     });
 
-    std::vector<Cursor> cursors;
+    std::vector<SSTableIterator> cursors;
     cursors.reserve(inputs.size());
     for (const auto &path : inputs)
         cursors.emplace_back(path);
@@ -338,7 +338,7 @@ void SSTable::addRecordToFile(const std::filesystem::path& path, const std::vect
     writer.finish();
 }
 
-Cursor::Cursor(std::filesystem::path path) : path(std::move(path))
+SSTableIterator::SSTableIterator(std::filesystem::path path) : path(std::move(path))
 {
     if (!std::filesystem::exists(this->path))
         throw std::runtime_error("Invalid path");
@@ -361,18 +361,18 @@ Cursor::Cursor(std::filesystem::path path) : path(std::move(path))
     }
 }
 
-bool Cursor::valid() const
+bool SSTableIterator::valid() const
 {
     return currentRecord.has_value();
 }
 
-const Record& Cursor::current() const
+const Record& SSTableIterator::current() const
 {
     assert(valid());
     return *currentRecord;
 }
 
-void Cursor::advance()
+void SSTableIterator::advance()
 {
     if (valid() && currentPos < recordsSize)
     {

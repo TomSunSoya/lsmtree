@@ -164,7 +164,7 @@ TEST(SSTableTest, BuildPersistsTombstoneAndKeepsScanningUnrelatedKeys)
     std::filesystem::remove(walPath);
 }
 
-TEST(SSTableTest, CursorIteratesRecordsInTableOrder)
+TEST(SSTableTest, IteratorTraversesRecordsInTableOrderThroughBaseInterface)
 {
     const std::filesystem::path walPath("sstable_tests_cursor_iterate.wal");
     const std::filesystem::path sstablePath("sstable_tests_cursor_iterate.sst");
@@ -179,22 +179,23 @@ TEST(SSTableTest, CursorIteratesRecordsInTableOrder)
         ASSERT_NO_THROW(SSTable::build(memTable, sstablePath));
     }
 
-    Cursor cursor(sstablePath);
-    ASSERT_TRUE(cursor.valid());
-    ASSERT_NO_FATAL_FAILURE(expectRecord(cursor.current(), "alpha", Type::VALUE, "one"));
+    SSTableIterator concreteIterator(sstablePath);
+    Iterator &iterator = concreteIterator;
+    ASSERT_TRUE(iterator.valid());
+    ASSERT_NO_FATAL_FAILURE(expectRecord(iterator.current(), "alpha", Type::VALUE, "one"));
 
-    cursor.advance();
-    ASSERT_TRUE(cursor.valid());
-    ASSERT_NO_FATAL_FAILURE(expectRecord(cursor.current(), "beta", Type::VALUE, "two"));
+    iterator.advance();
+    ASSERT_TRUE(iterator.valid());
+    ASSERT_NO_FATAL_FAILURE(expectRecord(iterator.current(), "beta", Type::VALUE, "two"));
 
-    cursor.advance();
-    EXPECT_FALSE(cursor.valid());
+    iterator.advance();
+    EXPECT_FALSE(iterator.valid());
 
     std::filesystem::remove(sstablePath);
     std::filesystem::remove(walPath);
 }
 
-TEST(SSTableTest, CursorExposesTombstoneRecords)
+TEST(SSTableTest, IteratorExposesTombstoneRecords)
 {
     const std::filesystem::path walPath("sstable_tests_cursor_tombstone.wal");
     const std::filesystem::path sstablePath("sstable_tests_cursor_tombstone.sst");
@@ -210,7 +211,7 @@ TEST(SSTableTest, CursorExposesTombstoneRecords)
         ASSERT_NO_THROW(SSTable::build(memTable, sstablePath));
     }
 
-    Cursor cursor(sstablePath);
+    SSTableIterator cursor(sstablePath);
     ASSERT_TRUE(cursor.valid());
     ASSERT_NO_FATAL_FAILURE(expectRecord(cursor.current(), "alpha", Type::TOMBSTONE, ""));
 
@@ -225,12 +226,12 @@ TEST(SSTableTest, CursorExposesTombstoneRecords)
     std::filesystem::remove(walPath);
 }
 
-TEST(SSTableTest, CursorRejectsMissingFile)
+TEST(SSTableTest, IteratorRejectsMissingFile)
 {
     const std::filesystem::path sstablePath("sstable_tests_cursor_missing.sst");
     std::filesystem::remove(sstablePath);
 
-    EXPECT_THROW(Cursor cursor(sstablePath), std::runtime_error);
+    EXPECT_THROW(SSTableIterator cursor(sstablePath), std::runtime_error);
 }
 
 TEST(SSTableTest, ParseNumberedFileAcceptsOnlyExactNumericMiddle)
@@ -427,7 +428,7 @@ TEST(SSTableTest, MergeWritesRequestedOutputWithSortedRecords)
 
     ASSERT_TRUE(std::filesystem::is_regular_file(mergedPath));
 
-    Cursor cursor(mergedPath);
+    SSTableIterator cursor(mergedPath);
     ASSERT_TRUE(cursor.valid());
     ASSERT_NO_FATAL_FAILURE(expectRecord(cursor.current(), "alpha", Type::VALUE, "one"));
     cursor.advance();
