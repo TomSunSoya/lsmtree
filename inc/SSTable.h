@@ -8,8 +8,9 @@ class SSTableIterator;
 class SSTable
 {
 public:
-    static void build(const MemTable &mt, const std::filesystem::path& path);
-    static void merge(std::vector<std::filesystem::path> inputs, const std::filesystem::path& outPath);
+    static std::pair<std::string, std::string> build(const MemTable &mt, const std::filesystem::path& path);
+    static std::pair<std::string, std::string> merge(std::vector<std::filesystem::path> inputs,
+                                                     const std::filesystem::path& outPath);
     static void cleanupOrphanedTemps(const std::filesystem::path& dir);
 
     explicit SSTable(std::filesystem::path path);

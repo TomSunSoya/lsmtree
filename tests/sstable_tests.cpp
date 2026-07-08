@@ -164,6 +164,32 @@ TEST(SSTableTest, BuildPersistsTombstoneAndKeepsScanningUnrelatedKeys)
     std::filesystem::remove(walPath);
 }
 
+TEST(SSTableTest, BuildReturnsMinAndMaxKeysIncludingTombstones)
+{
+    const std::filesystem::path root("sstable_tests_build_returns_range");
+    const ScopedPathCleanup cleanup(root);
+    ASSERT_TRUE(std::filesystem::create_directories(root));
+    const std::filesystem::path sstablePath = root / "sst_0.sst";
+
+    std::pair<std::string, std::string> keyRange;
+    {
+        MemTable memTable((root / "wal_0.wal").string());
+        ASSERT_NO_FATAL_FAILURE(expectPut(memTable, "middle", "value"));
+        ASSERT_NO_FATAL_FAILURE(expectPut(memTable, "zulu", "last"));
+        ASSERT_TRUE(memTable.remove("alpha"));
+
+        ASSERT_NO_THROW(keyRange = SSTable::build(memTable, sstablePath));
+    }
+
+    EXPECT_EQ("alpha", keyRange.first);
+    EXPECT_EQ("zulu", keyRange.second);
+
+    const SSTable sstable(sstablePath);
+    ASSERT_NO_FATAL_FAILURE(expectTombstone(sstable, "alpha"));
+    ASSERT_NO_FATAL_FAILURE(expectGet(sstable, "middle", "value"));
+    ASSERT_NO_FATAL_FAILURE(expectGet(sstable, "zulu", "last"));
+}
+
 TEST(SSTableTest, IteratorTraversesRecordsInTableOrderThroughBaseInterface)
 {
     const std::filesystem::path walPath("sstable_tests_cursor_iterate.wal");
@@ -473,6 +499,41 @@ TEST(SSTableTest, MergeKeepsNewestDuplicateWithoutReorderingInputs)
     const SSTable merged(mergedPath);
     ASSERT_NO_FATAL_FAILURE(expectGet(merged, "alpha", "new"));
     ASSERT_NO_FATAL_FAILURE(expectGet(merged, "beta", "kept"));
+}
+
+TEST(SSTableTest, MergeReturnsMinAndMaxKeysFromMergedOutput)
+{
+    const std::filesystem::path root("sstable_tests_merge_returns_range");
+    const ScopedPathCleanup cleanup(root);
+    ASSERT_TRUE(std::filesystem::create_directories(root));
+    const std::filesystem::path olderPath = root / "sst_0.sst";
+    const std::filesystem::path newerPath = root / "sst_1.sst";
+    const std::filesystem::path mergedPath = root / "merged-output";
+
+    {
+        MemTable memTable((root / "wal_0.wal").string());
+        ASSERT_NO_FATAL_FAILURE(expectPut(memTable, "beta", "old"));
+        ASSERT_NO_FATAL_FAILURE(expectPut(memTable, "zulu", "last"));
+        ASSERT_NO_THROW(SSTable::build(memTable, olderPath));
+    }
+    {
+        MemTable memTable((root / "wal_1.wal").string());
+        ASSERT_NO_FATAL_FAILURE(expectPut(memTable, "alpha", "first"));
+        ASSERT_NO_FATAL_FAILURE(expectPut(memTable, "beta", "new"));
+        ASSERT_NO_THROW(SSTable::build(memTable, newerPath));
+    }
+
+    std::vector<std::filesystem::path> inputPaths{newerPath, olderPath};
+    std::pair<std::string, std::string> keyRange;
+    ASSERT_NO_THROW(keyRange = SSTable::merge(inputPaths, mergedPath));
+
+    EXPECT_EQ("alpha", keyRange.first);
+    EXPECT_EQ("zulu", keyRange.second);
+
+    const SSTable merged(mergedPath);
+    ASSERT_NO_FATAL_FAILURE(expectGet(merged, "alpha", "first"));
+    ASSERT_NO_FATAL_FAILURE(expectGet(merged, "beta", "new"));
+    ASSERT_NO_FATAL_FAILURE(expectGet(merged, "zulu", "last"));
 }
 
 TEST(SSTableTest, CleanupOrphanedTempsRemovesTemporaryFile)

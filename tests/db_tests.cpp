@@ -10,6 +10,7 @@
 #include <gtest/gtest.h>
 
 #include "DB.h"
+#include "Manifest.h"
 #include "SSTable.h"
 
 namespace
@@ -360,6 +361,56 @@ TEST(DBTest, FlushPublishesSSTableAndRotatesWal)
     std::filesystem::remove_all(root);
 }
 
+TEST(DBTest, EmptyFlushDoesNotAllocateSSTableOrRotateWal)
+{
+    const std::filesystem::path root("db_tests_empty_flush_noop");
+    const std::filesystem::path walPath = root / "wal" / "wal_0.wal";
+    const std::filesystem::path nextWalPath = root / "wal" / "wal_1.wal";
+    const std::filesystem::path sstablePath = root / "sstable" / "sst_0.sst";
+    std::filesystem::remove_all(root);
+
+    {
+        DB db(root, kManualFlushThreshold);
+
+        ASSERT_NO_THROW(db.flush());
+
+        EXPECT_TRUE(std::filesystem::is_regular_file(walPath));
+        EXPECT_FALSE(std::filesystem::exists(nextWalPath));
+        EXPECT_FALSE(std::filesystem::exists(sstablePath));
+    }
+
+    const Manifest manifest(root / "MANIFEST");
+    EXPECT_TRUE(manifest.allTableNumbers().empty());
+    EXPECT_EQ(0, manifest.logNumber());
+    EXPECT_EQ(0, manifest.nextNumber());
+
+    std::filesystem::remove_all(root);
+}
+
+TEST(DBTest, FlushPersistsSSTableKeyRangeInManifest)
+{
+    const std::filesystem::path root("db_tests_flush_persists_key_range");
+    std::filesystem::remove_all(root);
+
+    {
+        DB db(root, kManualFlushThreshold);
+
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "middle", "value"));
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "zulu", "last"));
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "alpha", "first"));
+        ASSERT_NO_THROW(db.flush());
+    }
+
+    const Manifest manifest(root / "MANIFEST");
+    const auto &level = manifest.level(0);
+    ASSERT_EQ(1, level.size());
+    EXPECT_EQ(0, level[0].number);
+    EXPECT_EQ("alpha", level[0].minKey);
+    EXPECT_EQ("zulu", level[0].maxKey);
+
+    std::filesystem::remove_all(root);
+}
+
 TEST(DBTest, GetFallsBackToFlushedSSTable)
 {
     const std::filesystem::path root("db_tests_get_from_sstable");
@@ -663,6 +714,34 @@ TEST(DBTest, CompactPersistsMergedTableAcrossReopen)
         ASSERT_NO_FATAL_FAILURE(expectGet(db, "beta", "two"));
         EXPECT_TRUE(std::filesystem::is_regular_file(compactedOutput));
     }
+
+    std::filesystem::remove_all(root);
+}
+
+TEST(DBTest, CompactPersistsMergedKeyRangeInManifest)
+{
+    const std::filesystem::path root("db_tests_compact_persists_key_range");
+    std::filesystem::remove_all(root);
+
+    {
+        DB db(root, kManualFlushThreshold);
+
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "middle", "value"));
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "zulu", "last"));
+        ASSERT_NO_THROW(db.flush());
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "alpha", "first"));
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "middle", "new"));
+        ASSERT_NO_THROW(db.flush());
+
+        ASSERT_NO_THROW(db.compact());
+    }
+
+    const Manifest manifest(root / "MANIFEST");
+    const auto &level = manifest.level(0);
+    ASSERT_EQ(1, level.size());
+    EXPECT_EQ(4, level[0].number);
+    EXPECT_EQ("alpha", level[0].minKey);
+    EXPECT_EQ("zulu", level[0].maxKey);
 
     std::filesystem::remove_all(root);
 }

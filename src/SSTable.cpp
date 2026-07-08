@@ -67,7 +67,7 @@ namespace
     }
 }
 
-void SSTable::build(const MemTable &mt, const std::filesystem::path &path)
+std::pair<std::string, std::string> SSTable::build(const MemTable &mt, const std::filesystem::path &path)
 {
     if (std::filesystem::exists(path))
         throw std::runtime_error("SSTable file already exists!");
@@ -78,9 +78,11 @@ void SSTable::build(const MemTable &mt, const std::filesystem::path &path)
         records.emplace_back(key, entry.type, entry.value);
 
     addRecordToFile(path, records);
+    return {records.front().key, records.back().key};
 }
 
-void SSTable::merge(std::vector<std::filesystem::path> inputs, const std::filesystem::path& outPath)
+std::pair<std::string, std::string> SSTable::merge(std::vector<std::filesystem::path> inputs,
+                                                   const std::filesystem::path& outPath)
 {
     std::ranges::sort(inputs, [] (const fs::path &a, const fs::path &b)
     {
@@ -138,6 +140,7 @@ void SSTable::merge(std::vector<std::filesystem::path> inputs, const std::filesy
             items.push({cursor.current().key, index});
     }
     addRecordToFile(outPath, records);
+    return {records.front().key, records.back().key};
 }
 
 void SSTable::cleanupOrphanedTemps(const std::filesystem::path& dir)
@@ -296,6 +299,8 @@ std::optional<Index> SSTable::readOneIndex(std::ifstream& ifs)
 
 void SSTable::addRecordToFile(const std::filesystem::path& path, const std::vector<Record>& records)
 {
+    if (records.empty())
+        throw std::runtime_error("Records cannot be empty");
     BloomFilter bloomFilter(records.size(), 0.01);
     FileWriter writer(path);
 

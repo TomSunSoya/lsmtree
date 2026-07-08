@@ -137,6 +137,9 @@ bool DB::remove(const std::string &key)
 
 void DB::flush()
 {
+    if (actMemTable->size() == 0)
+        return;
+
     namespace fs = std::filesystem;
     const auto fileNumber = manifest->allocateNumber();
     const auto ssTablePath = sstablePath(data_dir, fileNumber);
@@ -146,8 +149,8 @@ void DB::flush()
     const auto walFileNumber = manifest->allocateNumber();
     manifest->setLogNumber(walFileNumber);
 
-    SSTable::build(*actMemTable, ssTablePath);
-    manifest->addTable(fileNumber, "", "");
+    const auto [minKey, maxKey] = SSTable::build(*actMemTable, ssTablePath);
+    manifest->addTable(fileNumber, minKey, maxKey);
     manifest->save();
 
     // old wal file number == current sstable file number
@@ -172,11 +175,12 @@ void DB::compact()
     const fs::path outPath = inputPath / std::format("sst_{}.sst", outFileNumber);
 
     std::vector<fs::path> inputFiles;
+    inputFiles.reserve(tables.size());
     for (const auto index : tables)
         inputFiles.emplace_back(inputPath / std::format("sst_{}.sst", index));
 
-    SSTable::merge(inputFiles, outPath);
-    manifest->replaceTables(removed, outFileNumber, "", "");
+    const auto [minKey, maxKey] = SSTable::merge(inputFiles, outPath);
+    manifest->replaceTables(removed, outFileNumber, minKey, maxKey);
     manifest->save();
 
     for (const auto &oldFilePath : inputFiles)

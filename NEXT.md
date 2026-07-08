@@ -1,1 +1,1 @@
-leveled 第二步:把 flush/compact 传给 manifest 的空串占位换成真范围——SSTable::build/merge 手里的 records 已排序,首尾 key 就是 {minKey, maxKey},想办法把它俩返回给 DB 接进 addTable/replaceTables;补测试:flush 后 manifest 里的范围等于实际写入的首尾 key。
+leveled 第三步:compact 输出进 L1——触发条件改成 level(0) 的个数;replaceTables 重塑为跨层(删 L0 全部 + L1 参与者,新表加进 L1);读路径改成逐层走(L0 新→旧,L1 按范围找那一个表);第一版 L1 全量参与,按范围挑相交者留下一步。
