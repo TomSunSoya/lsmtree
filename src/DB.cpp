@@ -98,7 +98,7 @@ DB::DB(const std::filesystem::path& data_dir, const uint64_t threshold_, const u
     const auto sstableDir = data_dir / "sstable";
     const auto walDir = data_dir / "wal";
     SSTable::cleanupOrphanedTemps(sstableDir);
-    cleanupOrphanedSSTables(sstableDir, manifest->tables());
+    cleanupOrphanedSSTables(sstableDir, manifest->allTableNumbers());
 
     this->data_dir = data_dir;
     walFilePath = walPath(data_dir, manifest->logNumber());
@@ -147,7 +147,7 @@ void DB::flush()
     manifest->setLogNumber(walFileNumber);
 
     SSTable::build(*actMemTable, ssTablePath);
-    manifest->addTable(fileNumber);
+    manifest->addTable(fileNumber, "", "");
     manifest->save();
 
     // old wal file number == current sstable file number
@@ -158,7 +158,7 @@ void DB::flush()
 
     removeFile(oldWalFilePath, "remove wal file failed");
 
-    if (manifest->tables().size() > compactThreshold)
+    if (manifest->allTableNumbers().size() > compactThreshold)
         compact();
 }
 
@@ -167,15 +167,16 @@ void DB::compact()
     namespace fs = std::filesystem;
     const fs::path inputPath = data_dir / "sstable";
     const auto outFileNumber = manifest->allocateNumber();
-    const std::vector removed(manifest->tables().begin(), manifest->tables().end());
+    auto tables = manifest->allTableNumbers();
+    const std::vector removed(tables.begin(), tables.end());
     const fs::path outPath = inputPath / std::format("sst_{}.sst", outFileNumber);
 
     std::vector<fs::path> inputFiles;
-    for (const auto index : manifest->tables())
+    for (const auto index : tables)
         inputFiles.emplace_back(inputPath / std::format("sst_{}.sst", index));
 
     SSTable::merge(inputFiles, outPath);
-    manifest->replaceTables(removed, outFileNumber);
+    manifest->replaceTables(removed, outFileNumber, "", "");
     manifest->save();
 
     for (const auto &oldFilePath : inputFiles)
@@ -191,7 +192,7 @@ std::vector<Record> DB::scan(std::string_view start, std::string_view end) const
 
     namespace fs = std::filesystem;
     std::vector<fs::path> inputFiles;
-    for (const auto index : manifest->tables())
+    for (const auto index : manifest->allTableNumbers())
         inputFiles.emplace_back(sstablePath(data_dir, index));
 
     std::ranges::transform(inputFiles, std::back_inserter(iters), [](const fs::path &p)
@@ -208,7 +209,7 @@ std::vector<Record> DB::scan(std::string_view start, std::string_view end) const
 
 bool DB::searchFromSSTable(const std::string_view key, std::string& value) const
 {
-    for (const auto index : manifest->tables())
+    for (const auto index : manifest->allTableNumbers())
     {
         const auto filePath = sstablePath(data_dir, index);
         SSTable cur_table(filePath);

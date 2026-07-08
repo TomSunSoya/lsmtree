@@ -7,19 +7,24 @@
 #include <set>
 #include <vector>
 
+struct TableMeta
+{
+    uint64_t number;
+    std::string minKey, maxKey;
+};
+
 class Manifest
 {
 public:
     explicit Manifest(std::filesystem::path  path);
 
     // search
-    [[nodiscard]] const std::set<uint64_t, std::greater<>> &tables() const;
     [[nodiscard]] uint64_t nextNumber() const;
 
     // memory modify
     uint64_t allocateNumber();
-    void addTable(uint64_t n);
-    void replaceTables(const std::vector<uint64_t> &removed, uint64_t added);
+    void addTable(uint64_t n, std::string_view minKey, std::string_view maxKey);
+    void replaceTables(const std::vector<uint64_t> &removed, uint64_t added, std::string_view minKey, std::string_view maxKey);
 
     void save() const;
 
@@ -33,9 +38,15 @@ public:
         logNumber_ = log_number;
     }
 
+    [[nodiscard]] const std::vector<TableMeta> &level(size_t n) const;
+
+    [[nodiscard]] size_t levelCount() const;
+
+    [[nodiscard]] std::set<uint64_t, std::greater<>> allTableNumbers() const;
+
 private:
     std::filesystem::path path_;
-    std::set<uint64_t, std::greater<>> tables_;
+    std::vector<std::vector<TableMeta>> levels;
     uint64_t next_{};
     uint8_t version_{};
     uint64_t logNumber_{};

@@ -1,5 +1,3 @@
-
-
 #include "Manifest.h"
 
 #include <format>
@@ -8,34 +6,75 @@
 
 #include "utils.h"
 
+// MANIFEST binary layout:
+//   uint64_t level_count
+//   uint64_t log_number
+//   uint8_t  version
+//   uint64_t next_table_number
+//   repeated level_count times:
+//     uint64_t table_count
+//     repeated table_count times:
+//       uint64_t table_number
+//       uint32_t min_key_size
+//       byte[min_key_size] min_key
+//       uint32_t max_key_size
+//       byte[max_key_size] max_key
+// Keys are length-prefixed byte strings, so they may contain separators,
+// newlines, and embedded NUL bytes.
 Manifest::Manifest(std::filesystem::path path) : path_(std::move(path))
 {
-    if (std::ifstream ifs(path_); ifs)
+    if (std::ifstream ifs(path_, std::ios::binary); ifs)
     {
-        std::string line;
-        while (std::getline(ifs, line))
+        uint64_t levelNumber = 0;
+        ifs.read(reinterpret_cast<char*>(&levelNumber), sizeof(levelNumber));
+        if (!ifs)
+            throw std::ios_base::failure("failed to read level number");
+        ifs.read(reinterpret_cast<char*>(&logNumber_), sizeof(logNumber_));
+        if (!ifs)
+            throw std::ios_base::failure("failed to read log number");
+        ifs.read(reinterpret_cast<char*>(&version_), sizeof(version_));
+        if (!ifs)
+            throw std::ios_base::failure("failed to read version");
+        ifs.read(reinterpret_cast<char*>(&next_), sizeof(next_));
+        if (!ifs)
+            throw std::ios_base::failure("failed to read next");
+
+        levels.resize(levelNumber);
+        for (uint64_t i = 0; i < levelNumber; ++i)
         {
-            auto pos = line.find(':');
-            if (pos == std::string::npos)
-                throw std::runtime_error("Failed to find ':'");
-            std::string name = line.substr(0, pos);
-            std::string numStr = line.substr(pos + 1);
-            uint64_t num = std::stoull(numStr);
-            if (name == "log")
-                logNumber_ = num;
-            else if (name == "version")
-                version_ = num;
-            else if (name == "next")
-                next_ = num;
-            else
-                tables_.insert(num);
+            uint64_t tableNumber;
+            ifs.read(reinterpret_cast<char*>(&tableNumber), sizeof(tableNumber));
+            if (!ifs)
+                throw std::ios_base::failure("failed to read table number");
+            if (tableNumber)
+            {
+                levels[i].resize(tableNumber);
+                for (uint64_t j = 0; j < tableNumber; ++j)
+                {
+                    uint64_t number = 0;
+                    ifs.read(reinterpret_cast<char*>(&number), sizeof(number));
+                    if (!ifs)
+                        throw std::ios_base::failure("failed to read table's number");
+                    uint32_t minKeySize = 0, maxKeySize = 0;
+                    ifs.read(reinterpret_cast<char*>(&minKeySize), sizeof(minKeySize));
+                    if (!ifs)
+                        throw std::ios_base::failure("failed to read minKey size");
+                    std::string minKey(minKeySize, 0);
+                    ifs.read(minKey.data(), minKeySize);
+                    if (!ifs)
+                        throw std::ios_base::failure("failed to read minKey");
+                    ifs.read(reinterpret_cast<char*>(&maxKeySize), sizeof(maxKeySize));
+                    if (!ifs)
+                        throw std::ios_base::failure("failed to read maxKey size");
+                    std::string maxKey(maxKeySize, 0);
+                    ifs.read(maxKey.data(), maxKeySize);
+                    if (!ifs)
+                        throw std::ios_base::failure("failed to read maxKey");
+                    levels[i][j] = {number, minKey, maxKey};
+                }
+            }
         }
     }
-}
-
-const std::set<uint64_t, std::greater<>>& Manifest::tables() const
-{
-    return tables_;
 }
 
 uint64_t Manifest::nextNumber() const
@@ -48,31 +87,85 @@ uint64_t Manifest::allocateNumber()
     return next_++;
 }
 
-void Manifest::addTable(uint64_t n)
+void Manifest::addTable(const uint64_t n, std::string_view minKey, std::string_view maxKey)
 {
-    tables_.insert(n);
+    TableMeta table;
+    table.number = n;
+    table.minKey = minKey;
+    table.maxKey = maxKey;
+    if (levels.empty())
+        levels.push_back({table});
+    else
+    {
+        auto &level = levels.front();
+        const auto pos = std::lower_bound(level.begin(), level.end(), n, [](const TableMeta &table_meta, const uint64_t value)
+        {
+            return table_meta.number > value;
+        });
+        level.insert(pos, table);
+    }
 }
 
-void Manifest::replaceTables(const std::vector<uint64_t>& removed, uint64_t added)
+void Manifest::replaceTables(const std::vector<uint64_t>& removed, const uint64_t added, std::string_view minKey, std::string_view maxKey)
 {
-    for (auto remove : removed)
-        tables_.erase(remove);
-    tables_.insert(added);
+    if (!levels.empty())
+    {
+        std::erase_if(levels[0], [&](const TableMeta &table_meta)
+        {
+            return std::find_if(removed.begin(), removed.end(), [&table_meta](const uint64_t remove)
+            {
+                return table_meta.number == remove;
+            }) != removed.end();
+        });
+    }
+    addTable(added, minKey, maxKey);
 }
 
 void Manifest::save() const
 {
     FileWriter writer(path_);
-    std::string logStr = std::format("log:{}\n", logNumber_);
-    std::string versionStr = std::format("version:{}\n", version_);
-    std::string nextStr = std::format("next:{}\n", next_);
-    writeAll(writer.getFd(), logStr.data(), logStr.length());
-    writeAll(writer.getFd(), versionStr.data(), versionStr.length());
-    writeAll(writer.getFd(), nextStr.data(), nextStr.length());
-    for (auto table : tables_)
+
+    const uint64_t levelNumber = levelCount();
+    writeAll(writer.getFd(), &levelNumber, sizeof(levelNumber));
+    writeAll(writer.getFd(), &logNumber_, sizeof(logNumber_));
+    writeAll(writer.getFd(), &version_, sizeof(version_));
+    writeAll(writer.getFd(), &next_, sizeof(next_));
+
+    for (const auto &level : levels)
     {
-        std::string line = std::format("table:{}\n", table);
-        writeAll(writer.getFd(), line.data(), line.length());
+        const uint64_t tableNumber = level.size();
+        writeAll(writer.getFd(), &tableNumber, sizeof(tableNumber));
+        for (const auto &[number, minKey, maxKey] : level)
+        {
+            writeAll(writer.getFd(), &number, sizeof(number));
+            uint32_t minKeySize = minKey.length(), maxKeySize = maxKey.length();
+            writeAll(writer.getFd(), &minKeySize, sizeof(minKeySize));
+            writeAll(writer.getFd(), minKey.data(), minKey.length());
+            writeAll(writer.getFd(), &maxKeySize, sizeof(maxKeySize));
+            writeAll(writer.getFd(), maxKey.data(), maxKey.length());
+        }
     }
     writer.finish();
+}
+
+const std::vector<TableMeta>& Manifest::level(size_t n) const
+{
+    static constexpr std::vector<TableMeta> emptyLevels;
+    if (n >= levels.size())
+        return emptyLevels;
+    return levels[n];
+}
+
+size_t Manifest::levelCount() const
+{
+    return levels.size();
+}
+
+std::set<uint64_t, std::greater<>> Manifest::allTableNumbers() const
+{
+    std::set<uint64_t, std::greater<>> tableNumbers;
+    for (const auto &level : levels)
+        for (const auto &table : level)
+            tableNumbers.insert(table.number);
+    return tableNumbers;
 }

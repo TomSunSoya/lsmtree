@@ -1,4 +1,5 @@
 #include <cstdint>
+#include <cstddef>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -41,17 +42,16 @@ void writeFile(const std::filesystem::path &path, const std::string &content)
     ASSERT_TRUE(out.good()) << "expected file write to succeed: " << path;
 }
 
-void readFile(const std::filesystem::path &path, std::string &content)
-{
-    std::ifstream in(path, std::ios::binary);
-    ASSERT_TRUE(in.is_open()) << "expected file to exist: " << path;
-
-    content.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
-}
-
 void expectTables(const Manifest &manifest, std::set<uint64_t, std::greater<>> expected)
 {
-    EXPECT_EQ(expected, manifest.tables());
+    EXPECT_EQ(expected, manifest.allTableNumbers());
+}
+
+void expectBytesEqual(const std::string &expected, const std::string &actual)
+{
+    ASSERT_EQ(expected.size(), actual.size());
+    for (std::size_t i = 0; i < expected.size(); ++i)
+        EXPECT_EQ(static_cast<unsigned char>(expected[i]), static_cast<unsigned char>(actual[i])) << "byte offset " << i;
 }
 }
 
@@ -63,7 +63,7 @@ TEST(ManifestTest, MissingManifestStartsWithEmptyTableSet)
 
     const Manifest manifest(root / "MANIFEST");
 
-    EXPECT_TRUE(manifest.tables().empty());
+    EXPECT_TRUE(manifest.allTableNumbers().empty());
     EXPECT_EQ(0, manifest.nextNumber());
 }
 
@@ -81,15 +81,49 @@ TEST(ManifestTest, SaveAndReloadPreservesTablesAndNextNumber)
         EXPECT_EQ(0, first);
         EXPECT_EQ(1, second);
 
-        manifest.addTable(first);
-        manifest.addTable(second);
+        manifest.addTable(first, "apple", "mango");
+        manifest.addTable(second, "nectarine", "zucchini");
         ASSERT_NO_THROW(manifest.save());
     }
 
     Manifest reloaded(manifestPath);
     expectTables(reloaded, {1, 0});
+    ASSERT_EQ(2, reloaded.level(0).size());
+    EXPECT_EQ("nectarine", reloaded.level(0)[0].minKey);
+    EXPECT_EQ("zucchini", reloaded.level(0)[0].maxKey);
+    EXPECT_EQ("apple", reloaded.level(0)[1].minKey);
+    EXPECT_EQ("mango", reloaded.level(0)[1].maxKey);
     EXPECT_EQ(2, reloaded.nextNumber());
     EXPECT_EQ(2, reloaded.allocateNumber());
+}
+
+TEST(ManifestTest, SaveAndReloadPreservesArbitraryKeyBytes)
+{
+    const std::filesystem::path root("manifest_tests_arbitrary_key_bytes");
+    const ScopedPathCleanup cleanup(root);
+    ASSERT_TRUE(std::filesystem::create_directories(root));
+    const std::filesystem::path manifestPath = root / "MANIFEST";
+    const std::string newlineMin = "a\nb";
+    const std::string colonMax = "c:d";
+    const std::string nulMin("e\0f", 3);
+    const std::string mixedMax("g\nh:i\0j", 7);
+
+    {
+        Manifest manifest(manifestPath);
+        manifest.addTable(9, newlineMin, colonMax);
+        manifest.addTable(8, nulMin, mixedMax);
+        ASSERT_NO_THROW(manifest.save());
+    }
+
+    const Manifest reloaded(manifestPath);
+    const auto &level = reloaded.level(0);
+    ASSERT_EQ(2, level.size());
+    EXPECT_EQ(9, level[0].number);
+    EXPECT_EQ(8, level[1].number);
+    expectBytesEqual(newlineMin, level[0].minKey);
+    expectBytesEqual(colonMax, level[0].maxKey);
+    expectBytesEqual(nulMin, level[1].minKey);
+    expectBytesEqual(mixedMax, level[1].maxKey);
 }
 
 TEST(ManifestTest, StaleTemporaryFileDoesNotOverrideSavedManifest)
@@ -100,8 +134,14 @@ TEST(ManifestTest, StaleTemporaryFileDoesNotOverrideSavedManifest)
     const std::filesystem::path manifestPath = root / "MANIFEST";
     const std::filesystem::path tempPath(manifestPath.string() + ".tmp");
 
-    ASSERT_NO_FATAL_FAILURE(writeFile(manifestPath, "version:0\nnext:8\ntable:7\n"));
-    ASSERT_NO_FATAL_FAILURE(writeFile(tempPath, "version:0\nnext:1000\ntable:999\n"));
+    {
+        Manifest manifest(manifestPath);
+        for (uint64_t i = 0; i < 8; ++i)
+            EXPECT_EQ(i, manifest.allocateNumber());
+        manifest.addTable(7, "first", "last");
+        ASSERT_NO_THROW(manifest.save());
+    }
+    ASSERT_NO_FATAL_FAILURE(writeFile(tempPath, "stale temporary manifest"));
 
     const Manifest reloaded(manifestPath);
     expectTables(reloaded, {7});
@@ -120,15 +160,13 @@ TEST(ManifestTest, SavePublishesThroughTemporaryFileAndRemovesStaleTemp)
 
     {
         Manifest manifest(manifestPath);
-        manifest.addTable(4);
+        manifest.addTable(4, "first", "last");
         ASSERT_NO_THROW(manifest.save());
     }
 
     EXPECT_FALSE(std::filesystem::exists(tempPath)) << "save should publish by renaming MANIFEST.tmp over MANIFEST";
-
-    std::string content;
-    ASSERT_NO_FATAL_FAILURE(readFile(manifestPath, content));
-    EXPECT_EQ("log:0\nversion:0\nnext:0\ntable:4\n", content);
+    const Manifest reloaded(manifestPath);
+    expectTables(reloaded, {4});
 }
 
 TEST(ManifestTest, ReplaceTablesPersistsCompactionResult)
@@ -140,15 +178,19 @@ TEST(ManifestTest, ReplaceTablesPersistsCompactionResult)
 
     {
         Manifest manifest(manifestPath);
-        manifest.addTable(5);
-        manifest.addTable(3);
-        manifest.addTable(1);
+        manifest.addTable(5, "a", "c");
+        manifest.addTable(3, "d", "f");
+        manifest.addTable(1, "g", "i");
 
-        manifest.replaceTables({5, 3}, 7);
+        manifest.replaceTables({5, 3}, 7, "a", "f");
         expectTables(manifest, {7, 1});
         ASSERT_NO_THROW(manifest.save());
     }
 
     const Manifest reloaded(manifestPath);
     expectTables(reloaded, {7, 1});
+    ASSERT_EQ(2, reloaded.level(0).size());
+    EXPECT_EQ(7, reloaded.level(0)[0].number);
+    EXPECT_EQ("a", reloaded.level(0)[0].minKey);
+    EXPECT_EQ("f", reloaded.level(0)[0].maxKey);
 }

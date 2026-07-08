@@ -1,1 +1,1 @@
-实现 range scan:把 MemTable + 所有 SSTable 合并成一个有序迭代器(新盖旧、跳过 tombstone),复用 Cursor 和 k 路归并。第一步先想清楚:多个源里同一个 key 出现多次,迭代器怎么保证只吐最新的那条?
+leveled 第二步:把 flush/compact 传给 manifest 的空串占位换成真范围——SSTable::build/merge 手里的 records 已排序,首尾 key 就是 {minKey, maxKey},想办法把它俩返回给 DB 接进 addTable/replaceTables;补测试:flush 后 manifest 里的范围等于实际写入的首尾 key。
