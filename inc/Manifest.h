@@ -23,8 +23,9 @@ public:
 
     // memory modify
     uint64_t allocateNumber();
-    void addTable(uint64_t n, std::string_view minKey, std::string_view maxKey);
-    void replaceTables(const std::vector<uint64_t> &removed, uint64_t added, std::string_view minKey, std::string_view maxKey);
+    void addTable(uint64_t n, std::string_view minKey, std::string_view maxKey, uint32_t targetLevel);
+    void replaceTables(const std::vector<uint64_t>& removed, uint64_t added, std::string_view minKey,
+                       std::string_view maxKey, uint32_t targetLevel);
 
     void save() const;
 

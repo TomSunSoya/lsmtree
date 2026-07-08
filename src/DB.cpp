@@ -150,7 +150,7 @@ void DB::flush()
     manifest->setLogNumber(walFileNumber);
 
     const auto [minKey, maxKey] = SSTable::build(*actMemTable, ssTablePath);
-    manifest->addTable(fileNumber, minKey, maxKey);
+    manifest->addTable(fileNumber, minKey, maxKey, 0);
     manifest->save();
 
     // old wal file number == current sstable file number
@@ -161,7 +161,7 @@ void DB::flush()
 
     removeFile(oldWalFilePath, "remove wal file failed");
 
-    if (manifest->allTableNumbers().size() > compactThreshold)
+    if (manifest->level(0).size() > compactThreshold)
         compact();
 }
 
@@ -180,7 +180,7 @@ void DB::compact()
         inputFiles.emplace_back(inputPath / std::format("sst_{}.sst", index));
 
     const auto [minKey, maxKey] = SSTable::merge(inputFiles, outPath);
-    manifest->replaceTables(removed, outFileNumber, minKey, maxKey);
+    manifest->replaceTables(removed, outFileNumber, minKey, maxKey, 1);
     manifest->save();
 
     for (const auto &oldFilePath : inputFiles)

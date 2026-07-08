@@ -737,7 +737,7 @@ TEST(DBTest, CompactPersistsMergedKeyRangeInManifest)
     }
 
     const Manifest manifest(root / "MANIFEST");
-    const auto &level = manifest.level(0);
+    const auto &level = manifest.level(1);
     ASSERT_EQ(1, level.size());
     EXPECT_EQ(4, level[0].number);
     EXPECT_EQ("alpha", level[0].minKey);
@@ -862,6 +862,54 @@ TEST(DBTest, FlushAutoCompactsOnlyAfterTableCountExceedsThreshold)
         ASSERT_NO_FATAL_FAILURE(expectGet(db, "second", "two"));
         ASSERT_NO_FATAL_FAILURE(expectGet(db, "third", "three"));
         EXPECT_TRUE(std::filesystem::is_regular_file(compactedOutput));
+    }
+
+    std::filesystem::remove_all(root);
+}
+
+TEST(DBTest, AutoCompactMovesL0TablesToL1AndSurvivesReopen)
+{
+    const std::filesystem::path root("db_tests_auto_compact_l0_to_l1");
+    const std::filesystem::path compactedOutput = root / "sstable" / "sst_6.sst";
+    constexpr uint64_t compactThreshold = 2;
+    std::filesystem::remove_all(root);
+
+    {
+        DB db(root, kManualFlushThreshold, compactThreshold);
+
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "middle", "value"));
+        ASSERT_NO_THROW(db.flush());
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "alpha", "first"));
+        ASSERT_NO_THROW(db.flush());
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "zulu", "last"));
+        ASSERT_NO_THROW(db.flush());
+
+        const Manifest manifest(root / "MANIFEST");
+        EXPECT_TRUE(manifest.level(0).empty());
+        const auto &level1 = manifest.level(1);
+        ASSERT_EQ(1, level1.size());
+        EXPECT_EQ(6, level1[0].number);
+        EXPECT_EQ("alpha", level1[0].minKey);
+        EXPECT_EQ("zulu", level1[0].maxKey);
+        EXPECT_TRUE(std::filesystem::is_regular_file(compactedOutput));
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "alpha", "first"));
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "middle", "value"));
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "zulu", "last"));
+    }
+
+    {
+        const DB db(root, kManualFlushThreshold, compactThreshold);
+        const Manifest manifest(root / "MANIFEST");
+        EXPECT_TRUE(manifest.level(0).empty());
+        const auto &level1 = manifest.level(1);
+        ASSERT_EQ(1, level1.size());
+        EXPECT_EQ(6, level1[0].number);
+        EXPECT_EQ("alpha", level1[0].minKey);
+        EXPECT_EQ("zulu", level1[0].maxKey);
+        EXPECT_TRUE(std::filesystem::is_regular_file(compactedOutput));
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "alpha", "first"));
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "middle", "value"));
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "zulu", "last"));
     }
 
     std::filesystem::remove_all(root);

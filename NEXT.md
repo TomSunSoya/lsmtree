@@ -1,1 +1,1 @@
-leveled 第三步:compact 输出进 L1——触发条件改成 level(0) 的个数;replaceTables 重塑为跨层(删 L0 全部 + L1 参与者,新表加进 L1);读路径改成逐层走(L0 新→旧,L1 按范围找那一个表);第一版 L1 全量参与,按范围挑相交者留下一步。
+leveled 第四步:读路径逐层走——searchFromSSTable/scan 不再用 allTableNumbers,改为:L0 按新→旧(用 manifest 里的 min/max 先剪掉不含目标 key 的表),L1 按 minKey 二分定位到最多一个表(手感同稀疏索引);验收:多层结构下点查/扫描全对、打开的文件数下降(可用测试观察 SSTable 构造次数)。

@@ -1,10 +1,21 @@
 #include "Manifest.h"
 
+#include <algorithm>
 #include <format>
-#include <utility>
 #include <fstream>
+#include <iterator>
+#include <stdexcept>
+#include <utility>
 
 #include "utils.h"
+
+namespace
+{
+    bool rangesOverlap(const TableMeta &table, std::string_view minKey, std::string_view maxKey)
+    {
+        return minKey <= table.maxKey && table.minKey <= maxKey;
+    }
+}
 
 // MANIFEST binary layout:
 //   uint64_t level_count
@@ -87,38 +98,51 @@ uint64_t Manifest::allocateNumber()
     return next_++;
 }
 
-void Manifest::addTable(const uint64_t n, std::string_view minKey, std::string_view maxKey)
+void Manifest::addTable(const uint64_t n, std::string_view minKey, std::string_view maxKey, uint32_t targetLevel)
 {
-    TableMeta table;
-    table.number = n;
-    table.minKey = minKey;
-    table.maxKey = maxKey;
-    if (levels.empty())
-        levels.push_back({table});
-    else
+    TableMeta table{n, std::string(minKey), std::string(maxKey)};
+    if (targetLevel >= levels.size())
+        levels.resize(targetLevel + 1);
+
+    auto &level = levels[targetLevel];
+    if (targetLevel == 0)
     {
-        auto &level = levels.front();
         const auto pos = std::lower_bound(level.begin(), level.end(), n, [](const TableMeta &table_meta, const uint64_t value)
         {
             return table_meta.number > value;
         });
-        level.insert(pos, table);
+        level.insert(pos, std::move(table));
+        return;
     }
+
+    const auto pos = std::lower_bound(level.begin(), level.end(), table.minKey, [](const TableMeta &table_meta, const std::string &key)
+    {
+        return table_meta.minKey < key;
+    });
+    if (pos != level.begin() && rangesOverlap(*std::prev(pos), table.minKey, table.maxKey))
+        throw std::invalid_argument("overlapping key range");
+    if (pos != level.end() && rangesOverlap(*pos, table.minKey, table.maxKey))
+        throw std::invalid_argument("overlapping key range");
+    level.insert(pos, std::move(table));
 }
 
-void Manifest::replaceTables(const std::vector<uint64_t>& removed, const uint64_t added, std::string_view minKey, std::string_view maxKey)
+void Manifest::replaceTables(const std::vector<uint64_t>& removed, const uint64_t added, std::string_view minKey,
+                             std::string_view maxKey, uint32_t targetLevel)
 {
     if (!levels.empty())
     {
-        std::erase_if(levels[0], [&](const TableMeta &table_meta)
+        for (auto &level : levels)
         {
-            return std::find_if(removed.begin(), removed.end(), [&table_meta](const uint64_t remove)
+            std::erase_if(level, [&](const TableMeta &table_meta)
             {
-                return table_meta.number == remove;
-            }) != removed.end();
-        });
+                return std::find_if(removed.begin(), removed.end(), [&table_meta](const uint64_t remove)
+                {
+                    return table_meta.number == remove;
+                }) != removed.end();
+            });
+        }
     }
-    addTable(added, minKey, maxKey);
+    addTable(added, minKey, maxKey, targetLevel);
 }
 
 void Manifest::save() const
