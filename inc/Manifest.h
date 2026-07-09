@@ -45,6 +45,8 @@ public:
 
     [[nodiscard]] std::set<uint64_t, std::greater<>> allTableNumbers() const;
 
+    [[nodiscard]] std::optional<TableMeta> getTableMeta(uint64_t n_level, std::string_view key) const;
+
 private:
     std::filesystem::path path_;
     std::vector<std::vector<TableMeta>> levels;

@@ -193,3 +193,25 @@ std::set<uint64_t, std::greater<>> Manifest::allTableNumbers() const
             tableNumbers.insert(table.number);
     return tableNumbers;
 }
+
+std::optional<TableMeta> Manifest::getTableMeta(const uint64_t n_level, std::string_view key) const
+{
+    if (n_level == 0)
+        throw std::invalid_argument("Cannot get ZERO level");
+
+    if (n_level >= levels.size())
+        return std::nullopt;
+
+    const auto &level = levels[n_level];
+    auto it = std::upper_bound(level.begin(), level.end(), key, [](const std::string_view value, const TableMeta &table)
+    {
+       return table.minKey > value;
+    });
+
+    if (it == level.begin())
+        return std::nullopt;
+    it = std::prev(it);
+    if (key >= it->minKey && key <= it->maxKey)
+        return *it;
+    return std::nullopt;
+}

@@ -185,6 +185,59 @@ TEST(ManifestTest, AddTableRejectsOverlappingHigherLevelRanges)
     ASSERT_EQ(3, manifest.level(1).size());
 }
 
+TEST(ManifestTest, GetTableMetaReturnsEmptyWhenKeyIsBeforeFirstTable)
+{
+    const std::filesystem::path root("manifest_tests_get_meta_before_first");
+    const ScopedPathCleanup cleanup(root);
+    ASSERT_TRUE(std::filesystem::create_directories(root));
+
+    Manifest manifest(root / "MANIFEST");
+    manifest.addTable(10, "b", "d", 1);
+    manifest.addTable(11, "g", "k", 1);
+
+    EXPECT_FALSE(manifest.getTableMeta(1, "a").has_value());
+}
+
+TEST(ManifestTest, GetTableMetaReturnsEmptyWhenKeyFallsBetweenTables)
+{
+    const std::filesystem::path root("manifest_tests_get_meta_gap");
+    const ScopedPathCleanup cleanup(root);
+    ASSERT_TRUE(std::filesystem::create_directories(root));
+
+    Manifest manifest(root / "MANIFEST");
+    manifest.addTable(10, "b", "d", 1);
+    manifest.addTable(11, "g", "k", 1);
+
+    EXPECT_FALSE(manifest.getTableMeta(1, "e").has_value());
+}
+
+TEST(ManifestTest, GetTableMetaTreatsMinAndMaxKeysAsInclusiveBounds)
+{
+    const std::filesystem::path root("manifest_tests_get_meta_inclusive_bounds");
+    const ScopedPathCleanup cleanup(root);
+    ASSERT_TRUE(std::filesystem::create_directories(root));
+
+    Manifest manifest(root / "MANIFEST");
+    manifest.addTable(10, "b", "d", 1);
+    manifest.addTable(11, "g", "k", 1);
+
+    const auto firstMin = manifest.getTableMeta(1, "b");
+    ASSERT_TRUE(firstMin.has_value());
+    EXPECT_EQ(10, firstMin->number);
+
+    const auto firstMax = manifest.getTableMeta(1, "d");
+    ASSERT_TRUE(firstMax.has_value());
+    EXPECT_EQ(10, firstMax->number);
+
+    const auto secondMin = manifest.getTableMeta(1, "g");
+    ASSERT_TRUE(secondMin.has_value());
+    EXPECT_EQ(11, secondMin->number);
+
+    const auto secondMax = manifest.getTableMeta(1, "k");
+    ASSERT_TRUE(secondMax.has_value());
+    EXPECT_EQ(11, secondMax->number);
+}
+
 TEST(ManifestTest, StaleTemporaryFileDoesNotOverrideSavedManifest)
 {
     const std::filesystem::path root("manifest_tests_stale_tmp");

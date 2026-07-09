@@ -82,6 +82,23 @@ void expectFileContent(const std::filesystem::path &path, const std::string &exp
 
     EXPECT_EQ(expected, actual) << "unexpected file content in " << path;
 }
+
+void seedCompactedLevelOne(DB &db)
+{
+    ASSERT_NO_FATAL_FAILURE(expectPut(db, "l1-only", "l1-value"));
+    ASSERT_NO_THROW(db.flush());
+    ASSERT_NO_FATAL_FAILURE(expectPut(db, "shared", "l1-shared"));
+    ASSERT_NO_THROW(db.flush());
+    ASSERT_NO_FATAL_FAILURE(expectPut(db, "zulu", "l1-zulu"));
+    ASSERT_NO_THROW(db.flush());
+}
+
+void expectOneTableInLevelZeroAndOne(const std::filesystem::path &root)
+{
+    const Manifest manifest(root / "MANIFEST");
+    ASSERT_EQ(1, manifest.level(0).size());
+    ASSERT_EQ(1, manifest.level(1).size());
+}
 }
 
 TEST(DBTest, ConstructorCreatesDataDirectoryAndWalFile)
@@ -910,6 +927,82 @@ TEST(DBTest, AutoCompactMovesL0TablesToL1AndSurvivesReopen)
         ASSERT_NO_FATAL_FAILURE(expectGet(db, "alpha", "first"));
         ASSERT_NO_FATAL_FAILURE(expectGet(db, "middle", "value"));
         ASSERT_NO_FATAL_FAILURE(expectGet(db, "zulu", "last"));
+    }
+
+    std::filesystem::remove_all(root);
+}
+
+TEST(DBTest, LevelZeroValueWinsOverLevelOneForSameKey)
+{
+    const std::filesystem::path root("db_tests_l0_value_wins_l1");
+    constexpr uint64_t compactThreshold = 2;
+    std::filesystem::remove_all(root);
+
+    {
+        DB db(root, kManualFlushThreshold, compactThreshold);
+        ASSERT_NO_FATAL_FAILURE(seedCompactedLevelOne(db));
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "shared", "l0-shared"));
+        ASSERT_NO_THROW(db.flush());
+
+        ASSERT_NO_FATAL_FAILURE(expectOneTableInLevelZeroAndOne(root));
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "shared", "l0-shared"));
+    }
+
+    std::filesystem::remove_all(root);
+}
+
+TEST(DBTest, LevelZeroTombstoneHidesLevelOneValue)
+{
+    const std::filesystem::path root("db_tests_l0_tombstone_hides_l1");
+    constexpr uint64_t compactThreshold = 2;
+    std::filesystem::remove_all(root);
+
+    {
+        DB db(root, kManualFlushThreshold, compactThreshold);
+        ASSERT_NO_FATAL_FAILURE(seedCompactedLevelOne(db));
+        ASSERT_NO_FATAL_FAILURE(expectRemove(db, "shared"));
+        ASSERT_NO_THROW(db.flush());
+
+        ASSERT_NO_FATAL_FAILURE(expectOneTableInLevelZeroAndOne(root));
+        ASSERT_NO_FATAL_FAILURE(expectMissing(db, "shared"));
+    }
+
+    std::filesystem::remove_all(root);
+}
+
+TEST(DBTest, LevelOneValueIsReadWhenLevelZeroDoesNotCoverKey)
+{
+    const std::filesystem::path root("db_tests_l1_read_when_l0_misses_range");
+    constexpr uint64_t compactThreshold = 2;
+    std::filesystem::remove_all(root);
+
+    {
+        DB db(root, kManualFlushThreshold, compactThreshold);
+        ASSERT_NO_FATAL_FAILURE(seedCompactedLevelOne(db));
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "zzz", "l0-other"));
+        ASSERT_NO_THROW(db.flush());
+
+        ASSERT_NO_FATAL_FAILURE(expectOneTableInLevelZeroAndOne(root));
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "l1-only", "l1-value"));
+    }
+
+    std::filesystem::remove_all(root);
+}
+
+TEST(DBTest, MissingKeyReturnsFalseAcrossLevelZeroAndLevelOne)
+{
+    const std::filesystem::path root("db_tests_missing_across_l0_l1");
+    constexpr uint64_t compactThreshold = 2;
+    std::filesystem::remove_all(root);
+
+    {
+        DB db(root, kManualFlushThreshold, compactThreshold);
+        ASSERT_NO_FATAL_FAILURE(seedCompactedLevelOne(db));
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "zzz", "l0-other"));
+        ASSERT_NO_THROW(db.flush());
+
+        ASSERT_NO_FATAL_FAILURE(expectOneTableInLevelZeroAndOne(root));
+        ASSERT_NO_FATAL_FAILURE(expectMissing(db, "missing"));
     }
 
     std::filesystem::remove_all(root);

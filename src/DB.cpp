@@ -17,30 +17,6 @@ namespace
 {
     namespace fs = std::filesystem;
 
-    constexpr std::string_view kWalPrefix = "wal_";
-    constexpr std::string_view kWalSuffix = ".wal";
-    constexpr std::string_view kSSTablePrefix = "sst_";
-    constexpr std::string_view kSSTableSuffix = ".sst";
-
-    fs::path walPath(const fs::path& dataDir, const uint64_t fileNumber)
-    {
-        return dataDir / "wal" / std::format("{}{}{}", kWalPrefix, fileNumber, kWalSuffix);
-    }
-
-    fs::path sstablePath(const fs::path& dataDir, const uint64_t fileNumber)
-    {
-        return dataDir / "sstable" / std::format("{}{}{}", kSSTablePrefix, fileNumber, kSSTableSuffix);
-    }
-
-    void removeFile(const fs::path& path, const char* message)
-    {
-        if (::remove(path.c_str()))
-        {
-            const auto err = errno;
-            throw std::system_error(err, std::system_category(), message);
-        }
-    }
-
     void cleanupOrphanedWAL(const std::filesystem::path& dir, const uint64_t currentFileNumber)
     {
         if (!fs::exists(dir) || !fs::is_directory(dir))
@@ -213,15 +189,35 @@ std::vector<Record> DB::scan(std::string_view start, std::string_view end) const
 
 bool DB::searchFromSSTable(const std::string_view key, std::string& value) const
 {
-    for (const auto index : manifest->allTableNumbers())
+    const auto searchInFile = [this, key, &value] (const uint64_t index)
     {
         const auto filePath = sstablePath(data_dir, index);
-        SSTable cur_table(filePath);
-        const auto ret = cur_table.get(key, value);
+        const SSTable cur_table(filePath);
+        return cur_table.get(key, value);
+    };
+
+    for (const auto &level0 = manifest->level(0);
+        const auto &[number, minKey, maxKey] : level0)
+    {
+        if (key < minKey || key > maxKey)
+            continue;
+        const auto ret = searchInFile(number);
         if (ret == Result::VALUE)
             return true;
         if (ret == Result::TOMBSTONE)
             return false;
+    }
+
+    for (size_t i = 1; i < manifest->levelCount(); ++i)
+    {
+        if (const auto table = manifest->getTableMeta(i, key); table)
+        {
+            const auto ret = searchInFile(table->number);
+            if (ret == Result::VALUE)
+                return true;
+            if (ret == Result::TOMBSTONE)
+                return false;
+        }
     }
     return false;
 }

@@ -1,6 +1,7 @@
 #pragma once
 #include <cerrno>
 #include <filesystem>
+#include <format>
 #include <optional>
 #include <string>
 #include <system_error>
@@ -158,3 +159,27 @@ public:
 };
 
 std::vector<Record> mergeSorted(std::vector<std::unique_ptr<Iterator>> sources);
+
+constexpr std::string_view kWalPrefix = "wal_";
+constexpr std::string_view kWalSuffix = ".wal";
+constexpr std::string_view kSSTablePrefix = "sst_";
+constexpr std::string_view kSSTableSuffix = ".sst";
+
+inline std::filesystem::path walPath(const std::filesystem::path& dataDir, const uint64_t fileNumber)
+{
+    return dataDir / "wal" / std::format("{}{}{}", kWalPrefix, fileNumber, kWalSuffix);
+}
+
+inline std::filesystem::path sstablePath(const std::filesystem::path& dataDir, const uint64_t fileNumber)
+{
+    return dataDir / "sstable" / std::format("{}{}{}", kSSTablePrefix, fileNumber, kSSTableSuffix);
+}
+
+inline void removeFile(const std::filesystem::path& path, const char* message)
+{
+    if (::remove(path.c_str()))
+    {
+        const auto err = errno;
+        throw std::system_error(err, std::system_category(), message);
+    }
+}
