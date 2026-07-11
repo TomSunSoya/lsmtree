@@ -99,6 +99,28 @@ void expectOneTableInLevelZeroAndOne(const std::filesystem::path &root)
     ASSERT_EQ(1, manifest.level(0).size());
     ASSERT_EQ(1, manifest.level(1).size());
 }
+
+void addLevelOneTable(
+    const std::filesystem::path &root,
+    Manifest &manifest,
+    const std::vector<std::pair<std::string, std::string>> &records)
+{
+    const auto tableNumber = manifest.allocateNumber();
+    const auto walPath = root / ("fixture_" + std::to_string(tableNumber) + ".wal");
+    const auto tablePath = root / "sstable" / ("sst_" + std::to_string(tableNumber) + ".sst");
+    std::pair<std::string, std::string> keyRange;
+
+    {
+        MemTable table(walPath.string());
+        for (const auto &[key, value] : records)
+            ASSERT_TRUE(table.put(key, value)) << "expected fixture put to succeed for key: " << key;
+
+        ASSERT_NO_THROW(keyRange = SSTable::build(table, tablePath));
+    }
+
+    ASSERT_NO_THROW(manifest.addTable(tableNumber, keyRange.first, keyRange.second, 1));
+    std::filesystem::remove(walPath);
+}
 }
 
 TEST(DBTest, ConstructorCreatesDataDirectoryAndWalFile)
@@ -1097,6 +1119,68 @@ TEST(DBTest, ScanUsesNewestSSTableAndSurvivesReopen)
     {
         const DB db(root, kManualFlushThreshold);
         ASSERT_NO_FATAL_FAILURE(expectScanValues(db, "", "~", expected));
+    }
+
+    std::filesystem::remove_all(root);
+}
+
+TEST(DBTest, ScanPrefersLevelZeroRecordsAndKeepsLevelOneOnlyKeys)
+{
+    const std::filesystem::path root("db_tests_scan_l0_over_l1");
+    constexpr uint64_t compactThreshold = 2;
+    std::filesystem::remove_all(root);
+
+    {
+        DB db(root, kManualFlushThreshold, compactThreshold);
+        ASSERT_NO_FATAL_FAILURE(seedCompactedLevelOne(db));
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "shared", "l0-shared"));
+        ASSERT_NO_FATAL_FAILURE(expectRemove(db, "zulu"));
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "tango", "l0-only"));
+        ASSERT_NO_THROW(db.flush());
+
+        ASSERT_NO_FATAL_FAILURE(expectOneTableInLevelZeroAndOne(root));
+        ASSERT_NO_FATAL_FAILURE(expectScanValues(
+            db,
+            "l1-only",
+            "zzzz",
+            {
+                {"l1-only", "l1-value"},
+                {"shared", "l0-shared"},
+                {"tango", "l0-only"},
+            }));
+    }
+
+    std::filesystem::remove_all(root);
+}
+
+TEST(DBTest, ScanKeepsKeysFromEveryOverlappingLevelOneTable)
+{
+    const std::filesystem::path root("db_tests_scan_partial_l1_tables");
+    std::filesystem::remove_all(root);
+
+    {
+        const DB db(root, kManualFlushThreshold);
+    }
+
+    {
+        Manifest manifest(root / "MANIFEST");
+        ASSERT_NO_FATAL_FAILURE(addLevelOneTable(root, manifest, {{"alpha", "one"}, {"bravo", "two"}}));
+        ASSERT_NO_FATAL_FAILURE(addLevelOneTable(root, manifest, {{"delta", "four"}, {"foxtrot", "six"}}));
+        ASSERT_NO_FATAL_FAILURE(addLevelOneTable(root, manifest, {{"hotel", "eight"}, {"juliet", "ten"}}));
+        ASSERT_NO_THROW(manifest.save());
+    }
+
+    {
+        const DB db(root, kManualFlushThreshold);
+        ASSERT_NO_FATAL_FAILURE(expectScanValues(
+            db,
+            "charlie",
+            "india",
+            {
+                {"delta", "four"},
+                {"foxtrot", "six"},
+                {"hotel", "eight"},
+            }));
     }
 
     std::filesystem::remove_all(root);
