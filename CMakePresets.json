@@ -1,0 +1,18 @@
+{
+  "version": 6,
+  "configurePresets": [
+    {
+      "name": "modules",
+      "displayName": "Named modules (Homebrew LLVM)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/cmake-build-modules",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_C_COMPILER": "/opt/homebrew/opt/llvm/bin/clang",
+        "CMAKE_CXX_COMPILER": "/opt/homebrew/opt/llvm/bin/clang++",
+        "CMAKE_EXE_LINKER_FLAGS": "-L/opt/homebrew/opt/llvm/lib/c++ -Wl,-rpath,/opt/homebrew/opt/llvm/lib/c++",
+        "GTest_DIR": "/opt/homebrew/opt/googletest/lib/cmake/GTest"
+      }
+    }
+  ]
+}
