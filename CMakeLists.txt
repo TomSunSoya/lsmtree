@@ -14,6 +14,12 @@ add_library(lsmtree_lib
 target_include_directories(lsmtree_lib PUBLIC inc)
 target_compile_features(lsmtree_lib PUBLIC cxx_std_23)
 
+target_sources(lsmtree_lib
+        PUBLIC
+        FILE_SET CXX_MODULES
+        BASE_DIRS modules
+        FILES modules/smoke.cppm)
+
 enable_testing()
 
 find_package(GTest CONFIG REQUIRED)
@@ -33,3 +39,4 @@ add_lsmtree_test(manifest_tests tests/manifest_tests.cpp)
 add_lsmtree_test(db_tests tests/db_tests.cpp)
 add_lsmtree_test(bloom_filter_tests tests/bloom_filter_tests.cpp)
 add_lsmtree_test(utils_tests tests/utils_tests.cpp)
+add_lsmtree_test(modules_smoke_tests tests/modules_smoke_tests.cpp)

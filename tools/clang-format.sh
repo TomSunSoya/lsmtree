@@ -55,7 +55,7 @@ if [[ "$actual_version" != *"$expected_version"* ]]; then
     exit 1
 fi
 
-patterns=('*.c' '*.cc' '*.cpp' '*.cxx' '*.h' '*.hh' '*.hpp' '*.hxx')
+patterns=('*.c' '*.cc' '*.cpp' '*.cppm' '*.cxx' '*.h' '*.hh' '*.hpp' '*.hxx')
 files=()
 while IFS= read -r -d '' file; do
     files+=("$file")
