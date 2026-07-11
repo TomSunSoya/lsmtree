@@ -273,8 +273,8 @@ std::vector<Record> DB::scan(const std::string_view start, const std::string_vie
     std::vector<std::unique_ptr<Iterator>> iterators;
     iterators.push_back(std::make_unique<MemTableIterator>(*activeMemTable_));
 
-    const auto inputPaths = selectScanTables(*manifest_, dataDirectory_, start, end);
-    for (const auto& path : inputPaths)
+    for (const auto inputPaths = selectScanTables(*manifest_, dataDirectory_, start, end);
+         const auto& path : inputPaths)
         iterators.push_back(std::make_unique<SSTableIterator>(path.string()));
 
     auto visibleRecords =
