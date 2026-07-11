@@ -18,7 +18,7 @@ target_sources(lsmtree_lib
         PUBLIC
         FILE_SET CXX_MODULES
         BASE_DIRS modules
-        FILES modules/smoke.cppm)
+        FILES modules/smoke.cppm modules/db.cppm)
 
 enable_testing()
 

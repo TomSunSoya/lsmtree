@@ -1,13 +1,22 @@
-#include "DB.h"
+module;
 
 #include <algorithm>
+#include <filesystem>
 #include <iostream>
+#include <memory>
 #include <ranges>
 #include <set>
 #include <span>
 #include <stdexcept>
+#include <string>
+#include <string_view>
+#include <vector>
 
+#include "Manifest.h"
+#include "MemTable.h"
 #include "SSTable.h"
+
+module lsm.db;
 
 namespace
 {

@@ -7,10 +7,11 @@
 
 #include <gtest/gtest.h>
 
-#include "DB.h"
 #include "Manifest.h"
 #include "SSTable.h"
 #include "test_support.h"
+
+import lsm.db;
 
 namespace
 {

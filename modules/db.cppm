@@ -1,4 +1,4 @@
-#pragma once
+module;
 
 #include <filesystem>
 #include <memory>
@@ -9,7 +9,9 @@
 #include "Manifest.h"
 #include "MemTable.h"
 
-class DB
+export module lsm.db;
+
+export class DB
 {
   public:
     explicit DB(const std::filesystem::path& dataDirectory, uint64_t flushThreshold = 5 * 1024 * 1024,
