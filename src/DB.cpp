@@ -14,9 +14,10 @@ module;
 
 #include "Manifest.h"
 #include "MemTable.h"
-#include "SSTable.h"
 
 module lsm.db;
+
+import lsm.sstable;
 
 namespace
 {

@@ -12,9 +12,11 @@
 
 #include <gtest/gtest.h>
 
+#include "BloomFilter.h"
 #include "MemTable.h"
-#include "SSTable.h"
 #include "test_support.h"
+
+import lsm.sstable;
 
 namespace
 {

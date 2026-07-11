@@ -1,4 +1,4 @@
-#pragma once
+module;
 
 #include <cstddef>
 #include <cstdint>
@@ -13,11 +13,12 @@
 #include <vector>
 
 #include "BloomFilter.h"
+#include "MemTable.h"
 #include "utils.h"
 
-class MemTable;
+export module lsm.sstable;
 
-class SSTable
+export class SSTable
 {
   public:
     static std::pair<std::string, std::string> build(const MemTable& memTable, const std::filesystem::path& path);
@@ -41,7 +42,7 @@ class SSTable
     std::unique_ptr<BloomFilter> bloomFilter_{};
 };
 
-class SSTableIterator : public Iterator
+export class SSTableIterator : public Iterator
 {
   public:
     explicit SSTableIterator(std::filesystem::path path);
