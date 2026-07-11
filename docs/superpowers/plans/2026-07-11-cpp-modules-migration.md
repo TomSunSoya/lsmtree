@@ -17,7 +17,7 @@
 - **Zero behavior change.** This is re-packaging only: no function body may be edited.
 - Module names: `lsm.db`, `lsm.sstable`, `lsm.manifest`, `lsm.memtable`, `lsm.bloom`, `lsm.utils`. Interface units in `modules/`, implementation units stay in `src/`.
 - Baseline: **111 tests, 100% pass** at HEAD `219f1b1` **plus the currently pending DB.h/DB.cpp cleanup, which must be committed before Task 1** (never start this refactor on a dirty tree). After Task 1 the expected count is **112** (smoke test added); after Task 8 it is **111** again. Every task ends with `100% tests passed`.
-- **Formatting:** the pre-commit hook runs `tools/clang-format.sh check`. Run `./tools/clang-format.sh` (apply mode) before every commit in this plan. Task 1 adds `*.cppm` to the script's pattern list so module files are covered too.
+- **Formatting:** the pre-commit hook runs `tools/clang-format.sh check`. Run `./tools/clang-format.sh format` before every commit in this plan. Task 1 adds `*.cppm` to the script's pattern list so module files are covered too.
 - **Include-list rule (in case the code drifts again before execution):** a module unit's global fragment is the union of (a) the `.cpp` file's current `#include` block and (b) its own header's `#include` block, with project headers listed only until their component becomes a module. The exact lists below are correct as of `219f1b1`; if a file changed since, recompute with the rule rather than trusting the list.
 - `tests/test_support.h` contains **only std + gtest** helpers — it names no project types. It stays a plain header, untouched by the entire migration.
 - `$BUILD` is the build directory that passed the Task 1 gate: `cmake-build-debug` if Apple clang works, `cmake-build-modules` if the Homebrew fallback was needed. Every `cmake --build` / `ctest` below uses `$BUILD`.
@@ -51,7 +51,7 @@ Dependency edges (import graph, arrow = imports): db → {sstable, manifest, mem
 | GTest binary ABI vs Homebrew libc++ (only if fallback B taken) | link errors in test executables | libc++↔libc++ is normally compatible; if not, `brew install googletest` built against the same libc++, or stop and reassess |
 | Incomplete type across module boundary | `error: incomplete type 'Manifest'` in a test TU | the TU must `import` the module that owns the type (every TU imports what it **names**); as a last resort change the owning `import x;` in the interface to `export import x;` |
 | Macros never cross `import` | `assert`/`errno` undefined | keep `<cassert>` / `<cerrno>` / `<unistd.h>` / `<fcntl.h>` as textual includes in the global module fragment — Phase 2 explicitly preserves these |
-| Pre-commit hook rejects unformatted `.cppm` | commit fails at the hook | run `./tools/clang-format.sh` before committing (Task 1 adds `*.cppm` to its patterns) |
+| Pre-commit hook rejects unformatted `.cppm` | commit fails at the hook | run `./tools/clang-format.sh format` before committing (Task 1 adds `*.cppm` to its patterns) |
 | `import std` detection refusal (happened before on this machine) | configure error in Task 9 | stop-loss: abandon Phase 2, delete the build dir, Phase 1 state is the shipped state |
 | CLion indexing lags behind module support | red code in IDE, green build in terminal | trust the terminal; Tools → CMake → Reset Cache and Reload |
 
@@ -62,7 +62,7 @@ Dependency edges (import graph, arrow = imports): db → {sstable, manifest, mem
 - [ ] `git status` shows `M inc/DB.h`, `M src/DB.cpp` (an include cleanup + a range-for init-statement). Commit it as its own change before anything else:
 
 ```bash
-./tools/clang-format.sh && git add inc/DB.h src/DB.cpp && git commit -m "Tidy DB scan locals and includes"
+./tools/clang-format.sh format && git add inc/DB.h src/DB.cpp && git commit -m "Tidy DB scan locals and includes"
 ```
 
 (The plan file itself — `docs/superpowers/plans/…` — commit it here too or leave it untracked; either is fine.)
@@ -261,7 +261,7 @@ Run: `ctest --test-dir $BUILD` → `100% tests passed, 0 tests failed out of 112
 - [ ] **Step 6: Commit**
 
 ```bash
-./tools/clang-format.sh && git add -A
+./tools/clang-format.sh format && git add -A
 git commit -m "Move DB into the lsm.db named module"
 ```
 
@@ -372,7 +372,7 @@ File set gains `modules/sstable.cppm`. `git rm inc/SSTable.h`
 - [ ] **Step 6: Commit**
 
 ```bash
-./tools/clang-format.sh && git add -A
+./tools/clang-format.sh format && git add -A
 git commit -m "Move SSTable into the lsm.sstable named module"
 ```
 
@@ -466,7 +466,7 @@ File set gains `modules/manifest.cppm`. `git rm inc/Manifest.h`
 - [ ] **Step 6: Commit**
 
 ```bash
-./tools/clang-format.sh && git add -A
+./tools/clang-format.sh format && git add -A
 git commit -m "Move Manifest into the lsm.manifest named module"
 ```
 
@@ -566,7 +566,7 @@ File set gains `modules/memtable.cppm`. `git rm inc/MemTable.h`
 - [ ] **Step 6: Commit**
 
 ```bash
-./tools/clang-format.sh && git add -A
+./tools/clang-format.sh format && git add -A
 git commit -m "Move MemTable into the lsm.memtable named module"
 ```
 
@@ -641,7 +641,7 @@ File set gains `modules/bloom.cppm`. `git rm inc/BloomFilter.h`
 - [ ] **Step 6: Commit**
 
 ```bash
-./tools/clang-format.sh && git add -A
+./tools/clang-format.sh format && git add -A
 git commit -m "Move BloomFilter into the lsm.bloom named module"
 ```
 
@@ -734,7 +734,7 @@ Expected: **no output**.
 - [ ] **Step 7: Commit**
 
 ```bash
-./tools/clang-format.sh && git add -A
+./tools/clang-format.sh format && git add -A
 git commit -m "Move shared utilities into the lsm.utils named module"
 ```
 
@@ -761,7 +761,7 @@ In `AGENTS.md`, add one short paragraph: the project uses C++20 named modules; b
 - [ ] **Step 4: Commit**
 
 ```bash
-./tools/clang-format.sh && git add -A
+./tools/clang-format.sh format && git add -A
 git commit -m "Finish the named-module migration"
 ```
 
@@ -827,12 +827,12 @@ Expected: `100% tests passed, 0 tests failed out of 111`.
 
 Apply bottom-up, one module per commit:
 
-- [ ] **Step 1: `lsm.utils`** — interface fragment empties entirely; impl keeps `<cerrno>`, `<fcntl.h>`, `<unistd.h>`. Build + ctest (111 pass). `./tools/clang-format.sh && git commit -am "Import std in lsm.utils"`
-- [ ] **Step 2: `lsm.bloom`** — both fragments empty entirely. Build + ctest. `./tools/clang-format.sh && git commit -am "Import std in lsm.bloom"`
-- [ ] **Step 3: `lsm.memtable`** — interface fragment empties; impl keeps `<cassert>`, `<cerrno>`, `<fcntl.h>`, `<unistd.h>`. Build + ctest. `./tools/clang-format.sh && git commit -am "Import std in lsm.memtable"`
-- [ ] **Step 4: `lsm.manifest`** — both fragments empty. Build + ctest. `./tools/clang-format.sh && git commit -am "Import std in lsm.manifest"`
-- [ ] **Step 5: `lsm.sstable`** — interface fragment empties; impl keeps `<cassert>`. Build + ctest. `./tools/clang-format.sh && git commit -am "Import std in lsm.sstable"`
-- [ ] **Step 6: `lsm.db`** — both fragments empty (current DB.cpp uses no macro/POSIX headers). Build + ctest. `./tools/clang-format.sh && git commit -am "Import std in lsm.db"`
+- [ ] **Step 1: `lsm.utils`** — interface fragment empties entirely; impl keeps `<cerrno>`, `<fcntl.h>`, `<unistd.h>`. Build + ctest (111 pass). `./tools/clang-format.sh format && git commit -am "Import std in lsm.utils"`
+- [ ] **Step 2: `lsm.bloom`** — both fragments empty entirely. Build + ctest. `./tools/clang-format.sh format && git commit -am "Import std in lsm.bloom"`
+- [ ] **Step 3: `lsm.memtable`** — interface fragment empties; impl keeps `<cassert>`, `<cerrno>`, `<fcntl.h>`, `<unistd.h>`. Build + ctest. `./tools/clang-format.sh format && git commit -am "Import std in lsm.memtable"`
+- [ ] **Step 4: `lsm.manifest`** — both fragments empty. Build + ctest. `./tools/clang-format.sh format && git commit -am "Import std in lsm.manifest"`
+- [ ] **Step 5: `lsm.sstable`** — interface fragment empties; impl keeps `<cassert>`. Build + ctest. `./tools/clang-format.sh format && git commit -am "Import std in lsm.sstable"`
+- [ ] **Step 6: `lsm.db`** — both fragments empty (current DB.cpp uses no macro/POSIX headers). Build + ctest. `./tools/clang-format.sh format && git commit -am "Import std in lsm.db"`
 
 If any single module trips a libc++ include-vs-import conflict that resists a 15-minute fix, leave **that module** on includes (revert that step only) and continue — mixed state is legal and fine.
 
@@ -844,7 +844,7 @@ Run: `ctest --test-dir cmake-build-std` → `111 passed`.
 Update `AGENTS.md`: the canonical build now uses the `cmake-build-std` configure line from Task 9 Step 2 — paste it verbatim there.
 
 ```bash
-./tools/clang-format.sh && git add -A
+./tools/clang-format.sh format && git add -A
 git commit -m "Document the import std build configuration"
 ```
 
