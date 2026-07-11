@@ -1,1 +1,1 @@
-# leveled 第四步:读路径逐层走——searchFromSSTable/scan 不再用 allTableNumbers,改为:L0 按新→旧(用 manifest 里的 min/max 先剪掉不含目标 key 的表),L1 按 minKey 二分定位到最多一个表(手感同稀疏索引);验收:多层结构下点查/扫描全对、打开的文件数下降(可用测试观察 SSTable 构造次数)。
+# merge 输出按目标大小切成多个 L1 表——每攒够目标字节(可配置,测试用小值)收一个表、各带自己的范围;replaceTables 的 added 从单表变一批;验收:大输出被切成多个不重叠的 L1 表、点查/扫描全对、reopen 还原。

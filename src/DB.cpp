@@ -145,9 +145,33 @@ void DB::flush()
 void DB::compact()
 {
     namespace fs = std::filesystem;
+
+    const auto &level = manifest->level(0);
+    if (level.empty())
+        return;
+
     const fs::path inputPath = data_dir / "sstable";
     const auto outFileNumber = manifest->allocateNumber();
-    auto tables = manifest->allTableNumbers();
+
+    std::set<uint64_t, std::greater<>> tables;
+
+    for (const auto &table : level)
+        tables.insert(table.number);
+
+    std::string l0Min = level.front().minKey, l0Max = level.front().maxKey;
+    for (const auto &table : level)
+    {
+        l0Min = std::min(l0Min, table.minKey);
+        l0Max = std::max(l0Max, table.maxKey);
+    }
+
+    for (const auto &[number, minKey, maxKey] : manifest->level(1))
+    {
+        if (minKey > l0Max || maxKey < l0Min)
+            continue;
+        tables.insert(number);
+    }
+
     const std::vector removed(tables.begin(), tables.end());
     const fs::path outPath = inputPath / std::format("sst_{}.sst", outFileNumber);
 

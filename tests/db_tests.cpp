@@ -860,6 +860,177 @@ TEST(DBTest, CompactPreservesNewestValuesAndTombstonesAcrossReopen)
     std::filesystem::remove_all(root);
 }
 
+TEST(DBTest, CompactMergesOnlyOverlappingLevelOneTables)
+{
+    const std::filesystem::path root("db_tests_compact_overlapping_l1_only");
+    std::filesystem::remove_all(root);
+
+    {
+        const DB db(root, kManualFlushThreshold);
+    }
+
+    uint64_t leftNumber = 0;
+    uint64_t overlappingNumber = 0;
+    uint64_t rightNumber = 0;
+    {
+        Manifest manifest(root / "MANIFEST");
+        ASSERT_NO_FATAL_FAILURE(addLevelOneTable(root, manifest, {{"alpha", "left"}, {"bravo", "left"}}));
+        ASSERT_NO_FATAL_FAILURE(addLevelOneTable(root, manifest, {{"delta", "old"}, {"foxtrot", "old"}}));
+        ASSERT_NO_FATAL_FAILURE(addLevelOneTable(root, manifest, {{"hotel", "right"}, {"juliet", "right"}}));
+        ASSERT_EQ(3, manifest.level(1).size());
+        leftNumber = manifest.level(1)[0].number;
+        overlappingNumber = manifest.level(1)[1].number;
+        rightNumber = manifest.level(1)[2].number;
+        ASSERT_NO_THROW(manifest.save());
+    }
+
+    const auto leftPath = root / "sstable" / ("sst_" + std::to_string(leftNumber) + ".sst");
+    const auto overlappingPath = root / "sstable" / ("sst_" + std::to_string(overlappingNumber) + ".sst");
+    const auto rightPath = root / "sstable" / ("sst_" + std::to_string(rightNumber) + ".sst");
+    std::string leftContent;
+    std::string rightContent;
+    ASSERT_NO_FATAL_FAILURE(readFile(leftPath, leftContent));
+    ASSERT_NO_FATAL_FAILURE(readFile(rightPath, rightContent));
+
+    uint64_t l0Number = 0;
+    {
+        DB db(root, kManualFlushThreshold);
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "echo", "new"));
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "foxtrot", "new"));
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "golf", "new"));
+        ASSERT_NO_THROW(db.flush());
+
+        const Manifest beforeCompact(root / "MANIFEST");
+        ASSERT_EQ(1, beforeCompact.level(0).size());
+        l0Number = beforeCompact.level(0)[0].number;
+
+        ASSERT_NO_THROW(db.compact());
+
+        EXPECT_FALSE(std::filesystem::exists(root / "sstable" / ("sst_" + std::to_string(l0Number) + ".sst")));
+        EXPECT_FALSE(std::filesystem::exists(overlappingPath));
+        ASSERT_NO_FATAL_FAILURE(expectFileContent(leftPath, leftContent));
+        ASSERT_NO_FATAL_FAILURE(expectFileContent(rightPath, rightContent));
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "alpha", "left"));
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "delta", "old"));
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "foxtrot", "new"));
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "juliet", "right"));
+    }
+
+    {
+        const Manifest manifest(root / "MANIFEST");
+        EXPECT_TRUE(manifest.level(0).empty());
+        const auto &level1 = manifest.level(1);
+        ASSERT_EQ(3, level1.size());
+        EXPECT_EQ(leftNumber, level1[0].number);
+        EXPECT_EQ("alpha", level1[0].minKey);
+        EXPECT_EQ("bravo", level1[0].maxKey);
+        EXPECT_NE(overlappingNumber, level1[1].number);
+        EXPECT_EQ("delta", level1[1].minKey);
+        EXPECT_EQ("golf", level1[1].maxKey);
+        EXPECT_EQ(rightNumber, level1[2].number);
+        EXPECT_EQ("hotel", level1[2].minKey);
+        EXPECT_EQ("juliet", level1[2].maxKey);
+    }
+
+    {
+        const DB db(root, kManualFlushThreshold);
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "alpha", "left"));
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "delta", "old"));
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "echo", "new"));
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "foxtrot", "new"));
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "golf", "new"));
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "juliet", "right"));
+    }
+
+    std::filesystem::remove_all(root);
+}
+
+TEST(DBTest, CompactIncludesLevelOneTableInsideCombinedLevelZeroGap)
+{
+    const std::filesystem::path root("db_tests_compact_l1_inside_l0_gap");
+    std::filesystem::remove_all(root);
+
+    {
+        DB db(root, kManualFlushThreshold);
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "a", "l0-left"));
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "c", "l0-left"));
+        ASSERT_NO_THROW(db.flush());
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "x", "l0-right"));
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "z", "l0-right"));
+        ASSERT_NO_THROW(db.flush());
+    }
+
+    uint64_t gapTableNumber = 0;
+    {
+        Manifest manifest(root / "MANIFEST");
+        ASSERT_EQ(2, manifest.level(0).size());
+        ASSERT_NO_FATAL_FAILURE(addLevelOneTable(root, manifest, {{"e", "l1-gap"}, {"g", "l1-gap"}}));
+        ASSERT_EQ(1, manifest.level(1).size());
+        gapTableNumber = manifest.level(1)[0].number;
+        ASSERT_NO_THROW(manifest.save());
+    }
+
+    const auto gapTablePath = root / "sstable" / ("sst_" + std::to_string(gapTableNumber) + ".sst");
+    ASSERT_TRUE(std::filesystem::is_regular_file(gapTablePath));
+
+    {
+        DB db(root, kManualFlushThreshold);
+        ASSERT_NO_THROW(db.compact());
+        EXPECT_FALSE(std::filesystem::exists(gapTablePath));
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "a", "l0-left"));
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "e", "l1-gap"));
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "g", "l1-gap"));
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "z", "l0-right"));
+    }
+
+    {
+        const Manifest manifest(root / "MANIFEST");
+        EXPECT_TRUE(manifest.level(0).empty());
+        ASSERT_EQ(1, manifest.level(1).size());
+        EXPECT_NE(gapTableNumber, manifest.level(1)[0].number);
+        EXPECT_EQ("a", manifest.level(1)[0].minKey);
+        EXPECT_EQ("z", manifest.level(1)[0].maxKey);
+    }
+
+    {
+        const DB db(root, kManualFlushThreshold);
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "a", "l0-left"));
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "e", "l1-gap"));
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "g", "l1-gap"));
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "z", "l0-right"));
+    }
+
+    std::filesystem::remove_all(root);
+}
+
+TEST(DBTest, CompactWithoutLevelZeroDoesNotConsumeFileNumber)
+{
+    const std::filesystem::path root("db_tests_compact_without_l0_noop");
+    constexpr uint64_t compactThreshold = 2;
+    std::filesystem::remove_all(root);
+
+    {
+        DB db(root, kManualFlushThreshold, compactThreshold);
+        ASSERT_NO_FATAL_FAILURE(seedCompactedLevelOne(db));
+
+        const Manifest beforeCompact(root / "MANIFEST");
+        EXPECT_TRUE(beforeCompact.level(0).empty());
+        const auto expectedNextNumber = beforeCompact.nextNumber();
+
+        ASSERT_NO_THROW(db.compact());
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "after-noop", "value"));
+        ASSERT_NO_THROW(db.flush());
+
+        const Manifest afterFlush(root / "MANIFEST");
+        ASSERT_EQ(1, afterFlush.level(0).size());
+        EXPECT_EQ(expectedNextNumber, afterFlush.level(0)[0].number);
+        EXPECT_TRUE(std::filesystem::is_regular_file(
+            root / "sstable" / ("sst_" + std::to_string(expectedNextNumber) + ".sst")));
+    }
+
+    std::filesystem::remove_all(root);
+}
+
 TEST(DBTest, FlushAutoCompactsOnlyAfterTableCountExceedsThreshold)
 {
     const std::filesystem::path root("db_tests_flush_auto_compacts");
