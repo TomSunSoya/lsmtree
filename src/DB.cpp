@@ -12,11 +12,12 @@ module;
 #include <string_view>
 #include <vector>
 
-#include "MemTable.h"
+#include "utils.h"
 
 module lsm.db;
 
 import lsm.manifest;
+import lsm.memtable;
 import lsm.sstable;
 
 namespace

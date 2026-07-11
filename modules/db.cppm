@@ -6,11 +6,12 @@ module;
 #include <string_view>
 #include <vector>
 
-#include "MemTable.h"
+#include "utils.h"
 
 export module lsm.db;
 
 import lsm.manifest;
+import lsm.memtable;
 
 export class DB
 {

@@ -13,10 +13,11 @@ module;
 #include <vector>
 
 #include "BloomFilter.h"
-#include "MemTable.h"
 #include "utils.h"
 
 export module lsm.sstable;
+
+import lsm.memtable;
 
 export class SSTable
 {

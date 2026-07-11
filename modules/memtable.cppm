@@ -1,4 +1,4 @@
-#pragma once
+module;
 
 #include <cstddef>
 #include <filesystem>
@@ -11,7 +11,9 @@
 
 #include "utils.h"
 
-class MemTable
+export module lsm.memtable;
+
+export class MemTable
 {
   public:
     explicit MemTable(std::string_view logFilePath);
@@ -58,7 +60,7 @@ class MemTable
     size_t currentSizeBytes_;
 };
 
-class MemTableIterator : public Iterator
+export class MemTableIterator : public Iterator
 {
   public:
     explicit MemTableIterator(const MemTable& memTable);

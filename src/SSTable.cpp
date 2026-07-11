@@ -19,10 +19,11 @@ module;
 #include <vector>
 
 #include "BloomFilter.h"
-#include "MemTable.h"
 #include "utils.h"
 
 module lsm.sstable;
+
+import lsm.memtable;
 
 namespace
 {
