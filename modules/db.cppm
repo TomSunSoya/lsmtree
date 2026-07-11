@@ -1,17 +1,10 @@
-module;
-
-#include <filesystem>
-#include <memory>
-#include <string>
-#include <string_view>
-#include <vector>
-
-#include "utils.h"
-
 export module lsm.db;
 
+import lsm.utils;
 import lsm.manifest;
 import lsm.memtable;
+import std;
+import std.compat;
 
 export class DB
 {
@@ -31,11 +24,11 @@ export class DB
     bool searchSSTables(std::string_view key, std::string& value) const;
     Result searchTable(uint64_t tableNumber, std::string_view key, std::string& value) const;
 
-    std::unique_ptr<MemTable> activeMemTable_;
-    std::filesystem::path dataDirectory_;
-    std::filesystem::path walFilePath_;
-    uint64_t flushThresholdBytes_;
-    std::unique_ptr<Manifest> manifest_;
-    uint64_t level0CompactionThreshold_;
-    uint64_t compactionSliceBytes_;
+    std::unique_ptr<MemTable> activeMemTable_{};
+    std::filesystem::path dataDirectory_{};
+    std::filesystem::path walFilePath_{};
+    uint64_t flushThresholdBytes_{};
+    std::unique_ptr<Manifest> manifest_{};
+    uint64_t level0CompactionThreshold_{};
+    uint64_t compactionSliceBytes_{};
 };

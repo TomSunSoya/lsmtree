@@ -1,23 +1,8 @@
-module;
-
-#include <algorithm>
-#include <cstddef>
-#include <cstdint>
-#include <filesystem>
-#include <fstream>
-#include <functional>
-#include <iterator>
-#include <optional>
-#include <ranges>
-#include <set>
-#include <stdexcept>
-#include <string_view>
-#include <utility>
-#include <vector>
-
-#include "utils.h"
-
 module lsm.manifest;
+
+import lsm.utils;
+import std;
+import std.compat;
 
 namespace
 {

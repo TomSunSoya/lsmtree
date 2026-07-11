@@ -1,29 +1,14 @@
 module;
 
-#include <algorithm>
-#include <array>
 #include <cassert>
-#include <cstddef>
-#include <cstdint>
-#include <cstring>
-#include <filesystem>
-#include <fstream>
-#include <iterator>
-#include <memory>
-#include <optional>
-#include <span>
-#include <stdexcept>
-#include <string>
-#include <string_view>
-#include <utility>
-#include <vector>
-
-#include "BloomFilter.h"
-#include "utils.h"
 
 module lsm.sstable;
 
+import lsm.utils;
+import lsm.bloom;
 import lsm.memtable;
+import std;
+import std.compat;
 
 namespace
 {

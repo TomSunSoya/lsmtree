@@ -2,5 +2,5 @@ cmake-build-*/
 .idea/
 .DS_Store
 .omx/
-.superpowers/
 cmake-build-asan/
+cmake-build-modules/

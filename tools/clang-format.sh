@@ -58,6 +58,7 @@ fi
 patterns=('*.c' '*.cc' '*.cpp' '*.cppm' '*.cxx' '*.h' '*.hh' '*.hpp' '*.hxx')
 files=()
 while IFS= read -r -d '' file; do
+    [[ -e "$repo_root/$file" ]] || continue
     files+=("$file")
 done < <(git -C "$repo_root" ls-files -z --cached --others --exclude-standard -- "${patterns[@]}")
 

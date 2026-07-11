@@ -1,27 +1,15 @@
 module;
 
 #include <cassert>
-#include <cctype>
 #include <cerrno>
-#include <cstddef>
 #include <fcntl.h>
-#include <filesystem>
-#include <fstream>
-#include <iostream>
-#include <map>
-#include <optional>
-#include <sstream>
-#include <stdexcept>
-#include <string>
-#include <string_view>
-#include <system_error>
 #include <unistd.h>
-#include <utility>
-#include <vector>
-
-#include "utils.h"
 
 module lsm.memtable;
+
+import lsm.utils;
+import std;
+import std.compat;
 
 namespace
 {

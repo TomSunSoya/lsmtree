@@ -8,8 +8,8 @@
 #include <gtest/gtest.h>
 
 #include "test_support.h"
-#include "utils.h"
 
+import lsm.utils;
 import lsm.db;
 import lsm.manifest;
 import lsm.memtable;

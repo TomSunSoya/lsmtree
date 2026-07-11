@@ -1,9 +1,7 @@
-#include "BloomFilter.h"
+module lsm.bloom;
 
-#include <cmath>
-#include <cstring>
-#include <functional>
-#include <stdexcept>
+import std;
+import std.compat;
 
 namespace
 {

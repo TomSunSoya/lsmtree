@@ -1,23 +1,10 @@
-module;
-
-#include <cstddef>
-#include <cstdint>
-#include <filesystem>
-#include <fstream>
-#include <memory>
-#include <optional>
-#include <span>
-#include <string>
-#include <string_view>
-#include <utility>
-#include <vector>
-
-#include "BloomFilter.h"
-#include "utils.h"
-
 export module lsm.sstable;
 
+import lsm.utils;
+import lsm.bloom;
 import lsm.memtable;
+import std;
+import std.compat;
 
 export class SSTable
 {

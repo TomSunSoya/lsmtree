@@ -1,12 +1,9 @@
-#pragma once
+export module lsm.bloom;
 
-#include <cstddef>
-#include <cstdint>
-#include <span>
-#include <string_view>
-#include <vector>
+import std;
+import std.compat;
 
-class BloomFilter
+export class BloomFilter
 {
   public:
     static std::vector<std::byte> Serialize(const BloomFilter& bloomFilter);

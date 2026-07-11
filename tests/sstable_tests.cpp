@@ -12,10 +12,10 @@
 
 #include <gtest/gtest.h>
 
-#include "BloomFilter.h"
 #include "test_support.h"
-#include "utils.h"
 
+import lsm.utils;
+import lsm.bloom;
 import lsm.memtable;
 import lsm.sstable;
 
