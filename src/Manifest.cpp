@@ -126,8 +126,7 @@ void Manifest::addTable(const uint64_t n, std::string_view minKey, std::string_v
     level.insert(pos, std::move(table));
 }
 
-void Manifest::replaceTables(const std::vector<uint64_t>& removed, const uint64_t added, std::string_view minKey,
-                             std::string_view maxKey, uint32_t targetLevel)
+void Manifest::replaceTables(const std::vector<uint64_t>& removed, const std::vector<TableMeta>& added, const uint32_t targetLevel)
 {
     if (!levels.empty())
     {
@@ -135,14 +134,15 @@ void Manifest::replaceTables(const std::vector<uint64_t>& removed, const uint64_
         {
             std::erase_if(level, [&](const TableMeta &table_meta)
             {
-                return std::find_if(removed.begin(), removed.end(), [&table_meta](const uint64_t remove)
+                return std::ranges::find_if(removed, [&table_meta](const uint64_t remove)
                 {
                     return table_meta.number == remove;
                 }) != removed.end();
             });
         }
     }
-    addTable(added, minKey, maxKey, targetLevel);
+    for (const auto &[number, minKey, maxKey] : added)
+        addTable(number, minKey, maxKey, targetLevel);
 }
 
 void Manifest::save() const

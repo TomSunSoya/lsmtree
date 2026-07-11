@@ -62,7 +62,9 @@ namespace
     }
 }
 
-DB::DB(const std::filesystem::path& data_dir, const uint64_t threshold_, const uint64_t compactThreshold_) : threshold(threshold_), compactThreshold(compactThreshold_)
+DB::DB(const std::filesystem::path& data_dir, const uint64_t threshold_, const uint64_t compactThreshold_,
+       const uint64_t sliceThreshold_) : threshold(threshold_), compactThreshold(compactThreshold_),
+                                         sliceThreshold(sliceThreshold_)
 {
     namespace fs = std::filesystem;
     if (!fs::exists(data_dir))
@@ -151,7 +153,6 @@ void DB::compact()
         return;
 
     const fs::path inputPath = data_dir / "sstable";
-    const auto outFileNumber = manifest->allocateNumber();
 
     std::set<uint64_t, std::greater<>> tables;
 
@@ -173,15 +174,46 @@ void DB::compact()
     }
 
     const std::vector removed(tables.begin(), tables.end());
-    const fs::path outPath = inputPath / std::format("sst_{}.sst", outFileNumber);
 
     std::vector<fs::path> inputFiles;
     inputFiles.reserve(tables.size());
     for (const auto index : tables)
         inputFiles.emplace_back(inputPath / std::format("sst_{}.sst", index));
 
-    const auto [minKey, maxKey] = SSTable::merge(inputFiles, outPath);
-    manifest->replaceTables(removed, outFileNumber, minKey, maxKey, 1);
+    std::vector<std::unique_ptr<Iterator>> cursors;
+    cursors.reserve(inputFiles.size());
+    for (const auto &path : inputFiles)
+        cursors.emplace_back(std::make_unique<SSTableIterator>(path));
+
+    auto records = mergeSorted(cursors);
+    std::span recordsSpan(records);
+    uint64_t fileSize = 0;
+    std::vector<TableMeta> tableMeta;
+    size_t j = 0;
+    for (size_t i = 0; i < recordsSpan.size(); ++i)
+    {
+        auto &record = recordsSpan[i];
+        // keySize(uint32_t) + valueSize(uint32_t) + type(uint8_t) = (4 + 4 + 1)
+        fileSize += 9 + record.key.length() + record.value.length();
+        if (fileSize > sliceThreshold)
+        {
+            const auto outFileNumber = manifest->allocateNumber();
+            const fs::path outPath = inputPath / std::format("sst_{}.sst", outFileNumber);
+            SSTable::addRecordToFile(recordsSpan.subspan(j, i-j+1), outPath);
+            tableMeta.emplace_back(outFileNumber, records[j].key, record.key);
+            fileSize = 0;
+            j = i+1;
+        }
+    }
+    if (fileSize)
+    {
+        const auto outFileNumber = manifest->allocateNumber();
+        const fs::path outPath = inputPath / std::format("sst_{}.sst", outFileNumber);
+        SSTable::addRecordToFile(recordsSpan.subspan(j), outPath);
+        tableMeta.emplace_back(outFileNumber, records[j].key, records.back().key);
+    }
+
+    manifest->replaceTables(removed, tableMeta, 1);
     manifest->save();
 
     for (const auto &oldFilePath : inputFiles)
@@ -213,7 +245,7 @@ std::vector<Record> DB::scan(std::string_view start, std::string_view end) const
         return std::make_unique<SSTableIterator>(p.string());
     });
 
-    auto finalResult = mergeSorted(std::move(iters)) | std::ranges::views::filter([&start, &end](const Record &record)
+    auto finalResult = mergeSorted(iters) | std::ranges::views::filter([&start, &end](const Record &record)
     {
         return record.key >= start && record.key < end && record.type == Type::VALUE;
     });

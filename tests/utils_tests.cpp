@@ -73,7 +73,7 @@ TEST(MergeSortedTest, EmptyAndNullSourcesProduceNoRecords)
     sources.push_back(nullptr);
     sources.push_back(source({}));
 
-    EXPECT_TRUE(mergeSorted(std::move(sources)).empty());
+    EXPECT_TRUE(mergeSorted(sources).empty());
 }
 
 TEST(MergeSortedTest, MergesDisjointSourcesInKeyOrder)
@@ -82,7 +82,7 @@ TEST(MergeSortedTest, MergesDisjointSourcesInKeyOrder)
     sources.push_back(source({value("beta", "two"), value("delta", "four")}));
     sources.push_back(source({value("alpha", "one"), value("gamma", "three")}));
 
-    const auto merged = mergeSorted(std::move(sources));
+    const auto merged = mergeSorted(sources);
 
     expectRecords(
         merged,
@@ -104,7 +104,7 @@ TEST(MergeSortedTest, EarlierSourceWinsDuplicateAndLaterSourceContinues)
         value("delta", "also-kept"),
     }));
 
-    const auto merged = mergeSorted(std::move(sources));
+    const auto merged = mergeSorted(sources);
 
     expectRecords(
         merged,
@@ -122,7 +122,7 @@ TEST(MergeSortedTest, KeepsTombstoneFromWinningSource)
     sources.push_back(source({tombstone("alpha")}));
     sources.push_back(source({value("alpha", "old"), value("beta", "kept")}));
 
-    const auto merged = mergeSorted(std::move(sources));
+    const auto merged = mergeSorted(sources);
 
     expectRecords(
         merged,

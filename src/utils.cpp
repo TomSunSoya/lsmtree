@@ -67,7 +67,7 @@ int FileWriter::getFd() const
     return dataFd.get();
 }
 
-std::vector<Record> mergeSorted(std::vector<std::unique_ptr<Iterator>> sources)
+std::vector<Record> mergeSorted(std::vector<std::unique_ptr<Iterator>>& sources)
 {
     std::vector<Record> result;
     struct MergeItem

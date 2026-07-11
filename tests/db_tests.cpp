@@ -121,6 +121,23 @@ void addLevelOneTable(
     ASSERT_NO_THROW(manifest.addTable(tableNumber, keyRange.first, keyRange.second, 1));
     std::filesystem::remove(walPath);
 }
+
+void expectSSTableValues(
+    const std::filesystem::path &path,
+    const std::vector<std::pair<std::string, std::string>> &expected)
+{
+    SSTableIterator cursor(path);
+    for (size_t i = 0; i < expected.size(); ++i)
+    {
+        ASSERT_TRUE(cursor.valid()) << "missing record index: " << i;
+        EXPECT_EQ(expected[i].first, cursor.current().key) << "record index: " << i;
+        EXPECT_EQ(Type::VALUE, cursor.current().type) << "record index: " << i;
+        EXPECT_EQ(expected[i].second, cursor.current().value) << "record index: " << i;
+        cursor.advance();
+    }
+    if (cursor.valid())
+        ADD_FAILURE() << "unexpected record in " << path << ": key='" << cursor.current().key << "'";
+}
 }
 
 TEST(DBTest, ConstructorCreatesDataDirectoryAndWalFile)
@@ -1026,6 +1043,68 @@ TEST(DBTest, CompactWithoutLevelZeroDoesNotConsumeFileNumber)
         EXPECT_EQ(expectedNextNumber, afterFlush.level(0)[0].number);
         EXPECT_TRUE(std::filesystem::is_regular_file(
             root / "sstable" / ("sst_" + std::to_string(expectedNextNumber) + ".sst")));
+    }
+
+    std::filesystem::remove_all(root);
+}
+
+TEST(DBTest, CompactSplitsOutputIntoNonOverlappingLevelOneTablesAndSurvivesReopen)
+{
+    const std::filesystem::path root("db_tests_compact_splits_l1_output");
+    constexpr uint64_t sliceThreshold = 20;
+    std::filesystem::remove_all(root);
+
+    const std::vector<std::pair<std::string, std::string>> expected{
+        {"a", "1"},
+        {"b", "2"},
+        {"c", "3"},
+        {"d", "4"},
+        {"e", "5"},
+    };
+
+    {
+        DB db(root, kManualFlushThreshold, 4, sliceThreshold);
+        for (const auto &[key, value] : expected)
+            ASSERT_NO_FATAL_FAILURE(expectPut(db, key, value));
+        ASSERT_NO_THROW(db.flush());
+
+        ASSERT_NO_THROW(db.compact());
+        ASSERT_NO_FATAL_FAILURE(expectScanValues(db, "a", "f", expected));
+        for (const auto &[key, value] : expected)
+            ASSERT_NO_FATAL_FAILURE(expectGet(db, key, value));
+    }
+
+    {
+        const Manifest manifest(root / "MANIFEST");
+        EXPECT_TRUE(manifest.level(0).empty());
+        const auto &level1 = manifest.level(1);
+        ASSERT_EQ(3, level1.size());
+        EXPECT_EQ("a", level1[0].minKey);
+        EXPECT_EQ("b", level1[0].maxKey);
+        EXPECT_EQ("c", level1[1].minKey);
+        EXPECT_EQ("d", level1[1].maxKey);
+        EXPECT_EQ("e", level1[2].minKey);
+        EXPECT_EQ("e", level1[2].maxKey);
+        for (const auto &table : level1)
+            EXPECT_TRUE(std::filesystem::is_regular_file(
+                root / "sstable" / ("sst_" + std::to_string(table.number) + ".sst")));
+
+        ASSERT_NO_FATAL_FAILURE(expectSSTableValues(
+            root / "sstable" / ("sst_" + std::to_string(level1[0].number) + ".sst"),
+            {expected[0], expected[1]}));
+        ASSERT_NO_FATAL_FAILURE(expectSSTableValues(
+            root / "sstable" / ("sst_" + std::to_string(level1[1].number) + ".sst"),
+            {expected[2], expected[3]}));
+        ASSERT_NO_FATAL_FAILURE(expectSSTableValues(
+            root / "sstable" / ("sst_" + std::to_string(level1[2].number) + ".sst"),
+            {expected[4]}));
+    }
+
+    {
+        const DB db(root, kManualFlushThreshold, 4, sliceThreshold);
+        ASSERT_NO_FATAL_FAILURE(expectScanValues(db, "a", "f", expected));
+        for (const auto &[key, value] : expected)
+            ASSERT_NO_FATAL_FAILURE(expectGet(db, key, value));
     }
 
     std::filesystem::remove_all(root);

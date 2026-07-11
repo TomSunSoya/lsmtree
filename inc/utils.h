@@ -41,6 +41,12 @@ struct Index
     uint64_t offset;
 };
 
+struct TableMeta
+{
+    uint64_t number;
+    std::string minKey, maxKey;
+};
+
 inline std::optional<uint64_t> parseNumberedFile(
     const std::string_view filename,
     const std::string_view prefix,
@@ -158,7 +164,7 @@ public:
     virtual void advance() = 0;
 };
 
-std::vector<Record> mergeSorted(std::vector<std::unique_ptr<Iterator>> sources);
+std::vector<Record> mergeSorted(std::vector<std::unique_ptr<Iterator>>& sources);
 
 constexpr std::string_view kWalPrefix = "wal_";
 constexpr std::string_view kWalSuffix = ".wal";

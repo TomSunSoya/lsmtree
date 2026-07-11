@@ -7,11 +7,7 @@
 #include <set>
 #include <vector>
 
-struct TableMeta
-{
-    uint64_t number;
-    std::string minKey, maxKey;
-};
+#include "utils.h"
 
 class Manifest
 {
@@ -24,8 +20,7 @@ public:
     // memory modify
     uint64_t allocateNumber();
     void addTable(uint64_t n, std::string_view minKey, std::string_view maxKey, uint32_t targetLevel);
-    void replaceTables(const std::vector<uint64_t>& removed, uint64_t added, std::string_view minKey,
-                       std::string_view maxKey, uint32_t targetLevel);
+    void replaceTables(const std::vector<uint64_t>& removed, const std::vector<TableMeta>& added, uint32_t targetLevel);
 
     void save() const;
 

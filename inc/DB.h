@@ -8,7 +8,7 @@
 class DB
 {
 public:
-    explicit DB(const std::filesystem::path &data_dir, uint64_t threshold_ = 5 * 1024 * 1024, uint64_t compactThreshold_ = 4);
+    explicit DB(const std::filesystem::path &data_dir, uint64_t threshold_ = 5 * 1024 * 1024, uint64_t compactThreshold_ = 4, uint64_t sliceThreshold_ = 4 * 1024 * 1024);
 
     bool put(const std::string &key, const std::string &value);
     bool get(std::string_view key, std::string &value) const;
@@ -24,6 +24,7 @@ private:
     uint64_t threshold;
     std::unique_ptr<Manifest> manifest;
     uint64_t compactThreshold;
+    uint64_t sliceThreshold;
 
     bool searchFromSSTable(std::string_view key, std::string& value) const;
 };

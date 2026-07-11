@@ -292,17 +292,25 @@ TEST(ManifestTest, ReplaceTablesPersistsCompactionResult)
         Manifest manifest(manifestPath);
         manifest.addTable(5, "a", "c", 0);
         manifest.addTable(3, "d", "f", 0);
-        manifest.addTable(1, "g", "i", 0);
+        manifest.addTable(1, "x", "z", 1);
 
-        manifest.replaceTables({5, 3}, 7, "a", "f", 0);
-        expectTables(manifest, {7, 1});
+        manifest.replaceTables({5, 3}, {{7, "a", "c"}, {8, "d", "f"}}, 1);
+        expectTables(manifest, {8, 7, 1});
         ASSERT_NO_THROW(manifest.save());
     }
 
     const Manifest reloaded(manifestPath);
-    expectTables(reloaded, {7, 1});
-    ASSERT_EQ(2, reloaded.level(0).size());
-    EXPECT_EQ(7, reloaded.level(0)[0].number);
-    EXPECT_EQ("a", reloaded.level(0)[0].minKey);
-    EXPECT_EQ("f", reloaded.level(0)[0].maxKey);
+    expectTables(reloaded, {8, 7, 1});
+    EXPECT_TRUE(reloaded.level(0).empty());
+    const auto &level1 = reloaded.level(1);
+    ASSERT_EQ(3, level1.size());
+    EXPECT_EQ(7, level1[0].number);
+    EXPECT_EQ("a", level1[0].minKey);
+    EXPECT_EQ("c", level1[0].maxKey);
+    EXPECT_EQ(8, level1[1].number);
+    EXPECT_EQ("d", level1[1].minKey);
+    EXPECT_EQ("f", level1[1].maxKey);
+    EXPECT_EQ(1, level1[2].number);
+    EXPECT_EQ("x", level1[2].minKey);
+    EXPECT_EQ("z", level1[2].maxKey);
 }

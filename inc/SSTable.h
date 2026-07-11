@@ -9,27 +9,27 @@ class SSTable
 {
 public:
     static std::pair<std::string, std::string> build(const MemTable &mt, const std::filesystem::path& path);
-    static std::pair<std::string, std::string> merge(std::vector<std::filesystem::path> inputs,
-                                                     const std::filesystem::path& outPath);
     static void cleanupOrphanedTemps(const std::filesystem::path& dir);
 
     explicit SSTable(std::filesystem::path path);
 
     Result get(std::string_view key, std::string &value) const;
 
+    static void addRecordToFile(std::span<Record> records, const std::filesystem::path& path);
+
 private:
     std::filesystem::path path;
     uint64_t recordsSize{}, bloomSize{}, indexSize{};
     std::unique_ptr<BloomFilter> bloomFilter{};
 
+    static constexpr size_t BLOCK_SIZE = 4 * 1024;
+
     [[nodiscard]] std::optional<std::pair<Index, uint64_t>> getBlock(std::string_view key) const;
 
     friend class SSTableIterator;
-    static constexpr size_t BLOCK_SIZE = 4 * 1024;
 
     static std::optional<Record> readOneRecord(std::ifstream &ifs);
     static std::optional<Index> readOneIndex(std::ifstream &ifs);
-    static void addRecordToFile(const std::filesystem::path &path, const std::vector<Record> &records);
 };
 
 class SSTableIterator : public Iterator

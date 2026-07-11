@@ -5,6 +5,7 @@
 #include <iomanip>
 #include <iterator>
 #include <sstream>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -427,39 +428,30 @@ TEST(SSTableTest, BuildRejectsExistingFileWithoutOverwriting)
     std::filesystem::remove(replacementWalPath);
 }
 
-TEST(SSTableTest, MergeWritesRequestedOutputWithSortedRecords)
+TEST(SSTableTest, AddRecordToFileWritesOnlyRequestedSpan)
 {
-    const std::filesystem::path root("sstable_tests_merge_sorted");
+    const std::filesystem::path root("sstable_tests_add_record_span");
     const ScopedPathCleanup cleanup(root);
     std::filesystem::create_directories(root);
-    const std::filesystem::path mergedPath = root / "merged-output";
-    std::vector<std::filesystem::path> inputPaths{
-        root / "sst_0.sst",
-        root / "sst_1.sst",
+    const std::filesystem::path sstablePath = root / "sst_0.sst";
+    std::vector<Record> records{
+        {"alpha", Type::VALUE, "one"},
+        {"beta", Type::TOMBSTONE, ""},
+        {"gamma", Type::VALUE, "three"},
+        {"zulu", Type::VALUE, "last"},
     };
 
-    {
-        MemTable memTable((root / "wal_0.wal").string());
-        ASSERT_NO_FATAL_FAILURE(expectPut(memTable, "gamma", "three"));
-        ASSERT_NO_THROW(SSTable::build(memTable, inputPaths[0]));
-    }
-    {
-        MemTable memTable((root / "wal_1.wal").string());
-        ASSERT_NO_FATAL_FAILURE(expectPut(memTable, "alpha", "one"));
-        ASSERT_NO_FATAL_FAILURE(expectPut(memTable, "beta", "two"));
-        ASSERT_NO_THROW(SSTable::build(memTable, inputPaths[1]));
-    }
+    ASSERT_NO_THROW(SSTable::addRecordToFile(std::span(records).subspan(1, 2), sstablePath));
 
-    ASSERT_NO_THROW(SSTable::merge(inputPaths, mergedPath));
+    const SSTable table(sstablePath);
+    ASSERT_NO_FATAL_FAILURE(expectTombstone(table, "beta"));
+    ASSERT_NO_FATAL_FAILURE(expectGet(table, "gamma", "three"));
+    ASSERT_NO_FATAL_FAILURE(expectMissing(table, "alpha"));
+    ASSERT_NO_FATAL_FAILURE(expectMissing(table, "zulu"));
 
-    ASSERT_TRUE(std::filesystem::is_regular_file(mergedPath));
-
-    SSTableIterator cursor(mergedPath);
+    SSTableIterator cursor(sstablePath);
     ASSERT_TRUE(cursor.valid());
-    ASSERT_NO_FATAL_FAILURE(expectRecord(cursor.current(), "alpha", Type::VALUE, "one"));
-    cursor.advance();
-    ASSERT_TRUE(cursor.valid());
-    ASSERT_NO_FATAL_FAILURE(expectRecord(cursor.current(), "beta", Type::VALUE, "two"));
+    ASSERT_NO_FATAL_FAILURE(expectRecord(cursor.current(), "beta", Type::TOMBSTONE, ""));
     cursor.advance();
     ASSERT_TRUE(cursor.valid());
     ASSERT_NO_FATAL_FAILURE(expectRecord(cursor.current(), "gamma", Type::VALUE, "three"));
@@ -467,73 +459,15 @@ TEST(SSTableTest, MergeWritesRequestedOutputWithSortedRecords)
     EXPECT_FALSE(cursor.valid());
 }
 
-TEST(SSTableTest, MergeKeepsNewestDuplicateWithoutReorderingInputs)
+TEST(SSTableTest, AddRecordToFileRejectsEmptySpan)
 {
-    const std::filesystem::path root("sstable_tests_merge_duplicate_continues");
+    const std::filesystem::path root("sstable_tests_add_record_empty");
     const ScopedPathCleanup cleanup(root);
     std::filesystem::create_directories(root);
-    const std::filesystem::path mergedPath = root / "merged-output";
-    const std::filesystem::path olderPath = root / "sst_0.sst";
-    const std::filesystem::path newerPath = root / "sst_1.sst";
-    std::vector<std::filesystem::path> inputPaths{
-        newerPath,
-        olderPath,
-    };
-    const auto originalInputPaths = inputPaths;
+    const auto sstablePath = root / "sst_0.sst";
 
-    {
-        MemTable memTable((root / "wal_0.wal").string());
-        ASSERT_NO_FATAL_FAILURE(expectPut(memTable, "alpha", "old"));
-        ASSERT_NO_FATAL_FAILURE(expectPut(memTable, "beta", "kept"));
-        ASSERT_NO_THROW(SSTable::build(memTable, olderPath));
-    }
-    {
-        MemTable memTable((root / "wal_1.wal").string());
-        ASSERT_NO_FATAL_FAILURE(expectPut(memTable, "alpha", "new"));
-        ASSERT_NO_THROW(SSTable::build(memTable, newerPath));
-    }
-
-    ASSERT_NO_THROW(SSTable::merge(inputPaths, mergedPath));
-
-    EXPECT_EQ(originalInputPaths, inputPaths);
-    const SSTable merged(mergedPath);
-    ASSERT_NO_FATAL_FAILURE(expectGet(merged, "alpha", "new"));
-    ASSERT_NO_FATAL_FAILURE(expectGet(merged, "beta", "kept"));
-}
-
-TEST(SSTableTest, MergeReturnsMinAndMaxKeysFromMergedOutput)
-{
-    const std::filesystem::path root("sstable_tests_merge_returns_range");
-    const ScopedPathCleanup cleanup(root);
-    ASSERT_TRUE(std::filesystem::create_directories(root));
-    const std::filesystem::path olderPath = root / "sst_0.sst";
-    const std::filesystem::path newerPath = root / "sst_1.sst";
-    const std::filesystem::path mergedPath = root / "merged-output";
-
-    {
-        MemTable memTable((root / "wal_0.wal").string());
-        ASSERT_NO_FATAL_FAILURE(expectPut(memTable, "beta", "old"));
-        ASSERT_NO_FATAL_FAILURE(expectPut(memTable, "zulu", "last"));
-        ASSERT_NO_THROW(SSTable::build(memTable, olderPath));
-    }
-    {
-        MemTable memTable((root / "wal_1.wal").string());
-        ASSERT_NO_FATAL_FAILURE(expectPut(memTable, "alpha", "first"));
-        ASSERT_NO_FATAL_FAILURE(expectPut(memTable, "beta", "new"));
-        ASSERT_NO_THROW(SSTable::build(memTable, newerPath));
-    }
-
-    std::vector<std::filesystem::path> inputPaths{newerPath, olderPath};
-    std::pair<std::string, std::string> keyRange;
-    ASSERT_NO_THROW(keyRange = SSTable::merge(inputPaths, mergedPath));
-
-    EXPECT_EQ("alpha", keyRange.first);
-    EXPECT_EQ("zulu", keyRange.second);
-
-    const SSTable merged(mergedPath);
-    ASSERT_NO_FATAL_FAILURE(expectGet(merged, "alpha", "first"));
-    ASSERT_NO_FATAL_FAILURE(expectGet(merged, "beta", "new"));
-    ASSERT_NO_FATAL_FAILURE(expectGet(merged, "zulu", "last"));
+    EXPECT_THROW(SSTable::addRecordToFile(std::span<Record>{}, sstablePath), std::runtime_error);
+    EXPECT_FALSE(std::filesystem::exists(sstablePath));
 }
 
 TEST(SSTableTest, CleanupOrphanedTempsRemovesTemporaryFile)

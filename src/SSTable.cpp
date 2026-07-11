@@ -77,69 +77,7 @@ std::pair<std::string, std::string> SSTable::build(const MemTable &mt, const std
     for (auto &[key, entry] : mt)
         records.emplace_back(key, entry.type, entry.value);
 
-    addRecordToFile(path, records);
-    return {records.front().key, records.back().key};
-}
-
-std::pair<std::string, std::string> SSTable::merge(std::vector<std::filesystem::path> inputs,
-                                                   const std::filesystem::path& outPath)
-{
-    std::ranges::sort(inputs, [] (const fs::path &a, const fs::path &b)
-    {
-        return sstableNumberOrZero(a) < sstableNumberOrZero(b);
-    });
-
-    std::vector<SSTableIterator> cursors;
-    cursors.reserve(inputs.size());
-    for (const auto &path : inputs)
-        cursors.emplace_back(path);
-
-    struct MergeItem
-    {
-        std::string key;
-        int index;
-
-        bool operator<(const MergeItem &item) const
-        {
-            if (key != item.key)
-                return key > item.key;
-            return index < item.index;
-        }
-    };
-
-    std::priority_queue<MergeItem> items;
-    for (int i = 0; i < cursors.size(); ++i)
-    {
-        if (auto &cursor = cursors[i]; cursor.valid())
-            items.push({cursor.current().key, i});
-    }
-
-    std::vector<Record> records;
-
-    while (!items.empty())
-    {
-        const auto [key, index] = items.top();
-        items.pop();
-        auto &cursor = cursors[index];
-        records.push_back(cursor.current());
-
-        cursor.advance();
-
-        while (!items.empty() && key == items.top().key)
-        {
-            const auto duplicateIndex = items.top().index;
-            auto &duplicateCursor = cursors[duplicateIndex];
-            duplicateCursor.advance();
-            items.pop();
-
-            if (duplicateCursor.valid())
-                items.push({duplicateCursor.current().key, duplicateIndex});
-        }
-
-        if (cursor.valid())
-            items.push({cursor.current().key, index});
-    }
-    addRecordToFile(outPath, records);
+    addRecordToFile(records, path);
     return {records.front().key, records.back().key};
 }
 
@@ -297,7 +235,7 @@ std::optional<Index> SSTable::readOneIndex(std::ifstream& ifs)
     return Index{keySize, std::move(key), offset};
 }
 
-void SSTable::addRecordToFile(const std::filesystem::path& path, const std::vector<Record>& records)
+void SSTable::addRecordToFile(std::span<Record> records, const std::filesystem::path& path)
 {
     if (records.empty())
         throw std::runtime_error("Records cannot be empty");
