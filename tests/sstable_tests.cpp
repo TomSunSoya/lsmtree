@@ -3,9 +3,8 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
-#include <iterator>
-#include <sstream>
 #include <span>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -15,63 +14,41 @@
 
 #include "MemTable.h"
 #include "SSTable.h"
+#include "test_support.h"
 
 namespace
 {
+using test_support::readFile;
+using test_support::ScopedPathCleanup;
+using test_support::writeFile;
+
 std::string multiBlockKey(const size_t index)
 {
     return "key-" + std::string(index < 10 ? "0" : "") + std::to_string(index);
 }
 
-void expectPut(MemTable &table, const std::string &key, const std::string &value)
+void expectPut(MemTable& table, const std::string& key, const std::string& value)
 {
     ASSERT_TRUE(table.put(key, value)) << "expected put to succeed for key: " << key;
 }
 
-void expectGet(const SSTable &table, const std::string &key, const std::string &expected)
+void expectGet(const SSTable& table, const std::string& key, const std::string& expected)
 {
     std::string actual;
     ASSERT_EQ(Result::VALUE, table.get(key, actual)) << "expected key to exist: " << key;
     EXPECT_EQ(expected, actual) << "unexpected value for key: " << key;
 }
 
-void expectMissing(const SSTable &table, const std::string &key)
+void expectMissing(const SSTable& table, const std::string& key)
 {
     std::string actual = "unchanged";
     EXPECT_EQ(Result::ABSENT, table.get(key, actual)) << "expected key to be missing: " << key;
 }
 
-void expectTombstone(const SSTable &table, const std::string &key)
+void expectTombstone(const SSTable& table, const std::string& key)
 {
     std::string actual = "unchanged";
     EXPECT_EQ(Result::TOMBSTONE, table.get(key, actual)) << "expected tombstone for key: " << key;
-}
-
-void readFile(const std::filesystem::path &path, std::string &content)
-{
-    std::ifstream in(path, std::ios::binary);
-    ASSERT_TRUE(in.is_open()) << "expected file to exist: " << path;
-
-    content.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
-}
-
-void writeFile(const std::filesystem::path &path, const std::string &content)
-{
-    std::ofstream out(path, std::ios::binary | std::ios::trunc);
-    ASSERT_TRUE(out.is_open()) << "expected file to open for writing: " << path;
-
-    out << content;
-    ASSERT_TRUE(out.good()) << "expected file write to succeed: " << path;
-}
-
-void expectFileContent(const std::filesystem::path &path, const std::string &expected)
-{
-    std::string actual;
-    readFile(path, actual);
-    if (::testing::Test::HasFatalFailure())
-        return;
-
-    EXPECT_EQ(expected, actual) << "unexpected file content in " << path;
 }
 
 std::string hexDump(std::string_view content)
@@ -88,38 +65,20 @@ std::string hexDump(std::string_view content)
     return out.str();
 }
 
-void expectRecord(const Record &record, const std::string &key, const Type type, const std::string &value)
+void expectRecord(const Record& record, const std::string& key, const Type type, const std::string& value)
 {
     EXPECT_EQ(key, record.key);
     EXPECT_EQ(type, record.type);
     EXPECT_EQ(value, record.value);
 }
 
-class ScopedPathCleanup
-{
-public:
-    explicit ScopedPathCleanup(std::filesystem::path path) : path(std::move(path))
-    {
-        std::filesystem::remove_all(this->path);
-    }
-
-    ~ScopedPathCleanup()
-    {
-        std::error_code ec;
-        std::filesystem::remove_all(path, ec);
-    }
-
-private:
-    std::filesystem::path path;
-};
-}
+} // namespace
 
 TEST(SSTableTest, BuildAndReadRecordsFromMemTable)
 {
     const std::filesystem::path walPath("sstable_tests_build_read.wal");
     const std::filesystem::path sstablePath("sstable_tests_build_read.sst");
-    std::filesystem::remove(walPath);
-    std::filesystem::remove(sstablePath);
+    const ScopedPathCleanup cleanup({walPath, sstablePath});
 
     {
         MemTable memTable(walPath.string());
@@ -135,17 +94,13 @@ TEST(SSTableTest, BuildAndReadRecordsFromMemTable)
     ASSERT_NO_FATAL_FAILURE(expectGet(sstable, "alpha", "one"));
     ASSERT_NO_FATAL_FAILURE(expectGet(sstable, "beta", "two"));
     expectMissing(sstable, "gamma");
-
-    std::filesystem::remove(sstablePath);
-    std::filesystem::remove(walPath);
 }
 
 TEST(SSTableTest, BuildPersistsTombstoneAndKeepsScanningUnrelatedKeys)
 {
     const std::filesystem::path walPath("sstable_tests_tombstone.wal");
     const std::filesystem::path sstablePath("sstable_tests_tombstone.sst");
-    std::filesystem::remove(walPath);
-    std::filesystem::remove(sstablePath);
+    const ScopedPathCleanup cleanup({walPath, sstablePath});
 
     {
         MemTable memTable(walPath.string());
@@ -160,9 +115,6 @@ TEST(SSTableTest, BuildPersistsTombstoneAndKeepsScanningUnrelatedKeys)
     expectTombstone(sstable, "alpha");
     ASSERT_NO_FATAL_FAILURE(expectGet(sstable, "beta", "two"));
     expectMissing(sstable, "gamma");
-
-    std::filesystem::remove(sstablePath);
-    std::filesystem::remove(walPath);
 }
 
 TEST(SSTableTest, BuildReturnsMinAndMaxKeysIncludingTombstones)
@@ -195,8 +147,7 @@ TEST(SSTableTest, IteratorTraversesRecordsInTableOrderThroughBaseInterface)
 {
     const std::filesystem::path walPath("sstable_tests_cursor_iterate.wal");
     const std::filesystem::path sstablePath("sstable_tests_cursor_iterate.sst");
-    std::filesystem::remove(walPath);
-    std::filesystem::remove(sstablePath);
+    const ScopedPathCleanup cleanup({walPath, sstablePath});
 
     {
         MemTable memTable(walPath.string());
@@ -207,7 +158,7 @@ TEST(SSTableTest, IteratorTraversesRecordsInTableOrderThroughBaseInterface)
     }
 
     SSTableIterator concreteIterator(sstablePath);
-    Iterator &iterator = concreteIterator;
+    Iterator& iterator = concreteIterator;
     ASSERT_TRUE(iterator.valid());
     ASSERT_NO_FATAL_FAILURE(expectRecord(iterator.current(), "alpha", Type::VALUE, "one"));
 
@@ -217,17 +168,13 @@ TEST(SSTableTest, IteratorTraversesRecordsInTableOrderThroughBaseInterface)
 
     iterator.advance();
     EXPECT_FALSE(iterator.valid());
-
-    std::filesystem::remove(sstablePath);
-    std::filesystem::remove(walPath);
 }
 
 TEST(SSTableTest, IteratorExposesTombstoneRecords)
 {
     const std::filesystem::path walPath("sstable_tests_cursor_tombstone.wal");
     const std::filesystem::path sstablePath("sstable_tests_cursor_tombstone.sst");
-    std::filesystem::remove(walPath);
-    std::filesystem::remove(sstablePath);
+    const ScopedPathCleanup cleanup({walPath, sstablePath});
 
     {
         MemTable memTable(walPath.string());
@@ -248,15 +195,12 @@ TEST(SSTableTest, IteratorExposesTombstoneRecords)
 
     cursor.advance();
     EXPECT_FALSE(cursor.valid());
-
-    std::filesystem::remove(sstablePath);
-    std::filesystem::remove(walPath);
 }
 
 TEST(SSTableTest, IteratorRejectsMissingFile)
 {
     const std::filesystem::path sstablePath("sstable_tests_cursor_missing.sst");
-    std::filesystem::remove(sstablePath);
+    const ScopedPathCleanup cleanup(sstablePath);
 
     EXPECT_THROW(SSTableIterator cursor(sstablePath), std::runtime_error);
 }
@@ -281,9 +225,8 @@ TEST(SSTableTest, BuildWritesExpectedLittleEndianRecordPrefix)
 {
     const std::filesystem::path walPath("sstable_tests_exact_bytes.wal");
     const std::filesystem::path sstablePath("sstable_tests_exact_bytes.sst");
+    const ScopedPathCleanup cleanup({walPath, sstablePath});
     constexpr size_t expectedRecordsSize = 25;
-    std::filesystem::remove(walPath);
-    std::filesystem::remove(sstablePath);
 
     {
         MemTable memTable(walPath.string());
@@ -297,13 +240,9 @@ TEST(SSTableTest, BuildWritesExpectedLittleEndianRecordPrefix)
     ASSERT_NO_FATAL_FAILURE(readFile(sstablePath, content));
 
     ASSERT_GE(content.size(), expectedRecordsSize);
-    EXPECT_EQ(
-        "00 01 00 00 00 02 00 00 00 61 78 79 "
-        "00 04 00 00 00 00 00 00 00 6c 6f 6e 67",
-        hexDump(std::string_view(content).substr(0, expectedRecordsSize)));
-
-    std::filesystem::remove(sstablePath);
-    std::filesystem::remove(walPath);
+    EXPECT_EQ("00 01 00 00 00 02 00 00 00 61 78 79 "
+              "00 04 00 00 00 00 00 00 00 6c 6f 6e 67",
+              hexDump(std::string_view(content).substr(0, expectedRecordsSize)));
 }
 
 TEST(SSTableTest, BuildCreatesParentDirectories)
@@ -311,8 +250,7 @@ TEST(SSTableTest, BuildCreatesParentDirectories)
     const std::filesystem::path walPath("sstable_tests_nested.wal");
     const std::filesystem::path root("sstable_tests_nested");
     const std::filesystem::path sstablePath = root / "child" / "table.sst";
-    std::filesystem::remove(walPath);
-    std::filesystem::remove_all(root);
+    const ScopedPathCleanup cleanup({walPath, root});
 
     {
         MemTable memTable(walPath.string());
@@ -325,9 +263,6 @@ TEST(SSTableTest, BuildCreatesParentDirectories)
 
     const SSTable sstable(sstablePath);
     ASSERT_NO_FATAL_FAILURE(expectGet(sstable, "parent", "created"));
-
-    std::filesystem::remove_all(root);
-    std::filesystem::remove(walPath);
 }
 
 TEST(SSTableTest, BuildDoesNotLeaveTemporaryFileAfterSuccess)
@@ -335,9 +270,7 @@ TEST(SSTableTest, BuildDoesNotLeaveTemporaryFileAfterSuccess)
     const std::filesystem::path walPath("sstable_tests_no_tmp_after_success.wal");
     const std::filesystem::path sstablePath("sstable_tests_no_tmp_after_success.sst");
     const std::filesystem::path tempPath(sstablePath.string() + ".tmp");
-    std::filesystem::remove(walPath);
-    std::filesystem::remove(sstablePath);
-    std::filesystem::remove(tempPath);
+    const ScopedPathCleanup cleanup({walPath, sstablePath, tempPath});
 
     {
         MemTable memTable(walPath.string());
@@ -347,14 +280,11 @@ TEST(SSTableTest, BuildDoesNotLeaveTemporaryFileAfterSuccess)
     }
 
     ASSERT_TRUE(std::filesystem::exists(sstablePath));
-    EXPECT_FALSE(std::filesystem::exists(tempPath)) << "successful build should publish by rename and leave no .tmp file";
+    EXPECT_FALSE(std::filesystem::exists(tempPath))
+        << "successful build should publish by rename and leave no .tmp file";
 
     const SSTable sstable(sstablePath);
     ASSERT_NO_FATAL_FAILURE(expectGet(sstable, "stable", "table"));
-
-    std::filesystem::remove(tempPath);
-    std::filesystem::remove(sstablePath);
-    std::filesystem::remove(walPath);
 }
 
 TEST(SSTableTest, BuildOverwritesStaleTemporaryFile)
@@ -362,9 +292,7 @@ TEST(SSTableTest, BuildOverwritesStaleTemporaryFile)
     const std::filesystem::path walPath("sstable_tests_stale_tmp.wal");
     const std::filesystem::path sstablePath("sstable_tests_stale_tmp.sst");
     const std::filesystem::path tempPath(sstablePath.string() + ".tmp");
-    std::filesystem::remove(walPath);
-    std::filesystem::remove(sstablePath);
-    std::filesystem::remove(tempPath);
+    const ScopedPathCleanup cleanup({walPath, sstablePath, tempPath});
     ASSERT_NO_FATAL_FAILURE(writeFile(tempPath, "stale temporary bytes"));
 
     {
@@ -380,10 +308,6 @@ TEST(SSTableTest, BuildOverwritesStaleTemporaryFile)
     const SSTable sstable(sstablePath);
     ASSERT_NO_FATAL_FAILURE(expectGet(sstable, "fresh", "value"));
     expectMissing(sstable, "stale");
-
-    std::filesystem::remove(tempPath);
-    std::filesystem::remove(sstablePath);
-    std::filesystem::remove(walPath);
 }
 
 TEST(SSTableTest, BuildRejectsExistingFileWithoutOverwriting)
@@ -392,10 +316,7 @@ TEST(SSTableTest, BuildRejectsExistingFileWithoutOverwriting)
     const std::filesystem::path replacementWalPath("sstable_tests_existing_replacement.wal");
     const std::filesystem::path sstablePath("sstable_tests_existing.sst");
     const std::filesystem::path tempPath(sstablePath.string() + ".tmp");
-    std::filesystem::remove(originalWalPath);
-    std::filesystem::remove(replacementWalPath);
-    std::filesystem::remove(sstablePath);
-    std::filesystem::remove(tempPath);
+    const ScopedPathCleanup cleanup({originalWalPath, replacementWalPath, sstablePath, tempPath});
 
     {
         MemTable memTable(originalWalPath.string());
@@ -414,18 +335,14 @@ TEST(SSTableTest, BuildRejectsExistingFileWithoutOverwriting)
         EXPECT_THROW(SSTable::build(memTable, sstablePath), std::runtime_error);
     }
 
-    EXPECT_FALSE(std::filesystem::exists(tempPath)) << "rejecting an existing target should not publish or leave a .tmp file";
+    EXPECT_FALSE(std::filesystem::exists(tempPath))
+        << "rejecting an existing target should not publish or leave a .tmp file";
     std::string contentAfterRejectedBuild;
     ASSERT_NO_FATAL_FAILURE(readFile(sstablePath, contentAfterRejectedBuild));
     EXPECT_EQ(originalContent, contentAfterRejectedBuild);
 
     const SSTable sstable(sstablePath);
     ASSERT_NO_FATAL_FAILURE(expectGet(sstable, "original", "value"));
-
-    std::filesystem::remove(tempPath);
-    std::filesystem::remove(sstablePath);
-    std::filesystem::remove(originalWalPath);
-    std::filesystem::remove(replacementWalPath);
 }
 
 TEST(SSTableTest, AddRecordToFileWritesOnlyRequestedSpan)
@@ -474,15 +391,13 @@ TEST(SSTableTest, CleanupOrphanedTempsRemovesTemporaryFile)
 {
     const std::filesystem::path root("sstable_tests_cleanup_tmp");
     const std::filesystem::path tempPath = root / "foo.sst.tmp";
-    std::filesystem::remove_all(root);
+    const ScopedPathCleanup cleanup(root);
     std::filesystem::create_directories(root);
     ASSERT_NO_FATAL_FAILURE(writeFile(tempPath, "junk"));
 
     ASSERT_NO_THROW(SSTable::cleanupOrphanedTemps(root));
 
     EXPECT_FALSE(std::filesystem::exists(tempPath));
-
-    std::filesystem::remove_all(root);
 }
 
 TEST(SSTableTest, CleanupOrphanedTempsKeepsSSTableFiles)
@@ -491,8 +406,7 @@ TEST(SSTableTest, CleanupOrphanedTempsKeepsSSTableFiles)
     const std::filesystem::path root("sstable_tests_cleanup_keep");
     const std::filesystem::path tempPath = root / "foo.sst.tmp";
     const std::filesystem::path sstablePath = root / "bar.sst";
-    std::filesystem::remove(walPath);
-    std::filesystem::remove_all(root);
+    const ScopedPathCleanup cleanup({walPath, root});
     std::filesystem::create_directories(root);
     ASSERT_NO_FATAL_FAILURE(writeFile(tempPath, "junk"));
 
@@ -510,30 +424,24 @@ TEST(SSTableTest, CleanupOrphanedTempsKeepsSSTableFiles)
 
     const SSTable sstable(sstablePath);
     ASSERT_NO_FATAL_FAILURE(expectGet(sstable, "keep", "me"));
-
-    std::filesystem::remove_all(root);
-    std::filesystem::remove(walPath);
 }
 
 TEST(SSTableTest, CleanupOrphanedTempsAcceptsEmptyDirectory)
 {
     const std::filesystem::path root("sstable_tests_cleanup_empty");
-    std::filesystem::remove_all(root);
+    const ScopedPathCleanup cleanup(root);
     std::filesystem::create_directories(root);
 
     ASSERT_NO_THROW(SSTable::cleanupOrphanedTemps(root));
 
     EXPECT_TRUE(std::filesystem::exists(root));
-
-    std::filesystem::remove_all(root);
 }
 
 TEST(SSTableTest, PreservesDelimiterAndEmptyFields)
 {
     const std::filesystem::path walPath("sstable_tests_raw_fields.wal");
     const std::filesystem::path sstablePath("sstable_tests_raw_fields.sst");
-    std::filesystem::remove(walPath);
-    std::filesystem::remove(sstablePath);
+    const ScopedPathCleanup cleanup({walPath, sstablePath});
 
     {
         MemTable memTable(walPath.string());
@@ -550,9 +458,6 @@ TEST(SSTableTest, PreservesDelimiterAndEmptyFields)
     ASSERT_NO_FATAL_FAILURE(expectGet(sstable, "", "empty-key"));
     ASSERT_NO_FATAL_FAILURE(expectGet(sstable, "empty-value", ""));
     ASSERT_NO_FATAL_FAILURE(expectGet(sstable, "line\nkey", "line\nvalue\r\n"));
-
-    std::filesystem::remove(sstablePath);
-    std::filesystem::remove(walPath);
 }
 
 TEST(SSTableTest, SparseIndexLocatesKeysAcrossMultipleBlocks)
@@ -595,7 +500,7 @@ TEST(SSTableTest, SparseIndexLocatesKeysAcrossMultipleBlocks)
         std::pair{multiBlockKey(9), 9 * recordSize},
     };
     in.seekg(recordsSize + bloomSize, std::ios::beg);
-    for (const auto &[expectedKey, expectedOffset] : expectedIndices)
+    for (const auto& [expectedKey, expectedOffset] : expectedIndices)
     {
         uint32_t keySize = 0;
         uint64_t offset = 0;
@@ -611,10 +516,7 @@ TEST(SSTableTest, SparseIndexLocatesKeysAcrossMultipleBlocks)
     const SSTable sstable(sstablePath);
     for (const size_t index : {0, 2, 3, 6, 9, 11})
     {
-        ASSERT_NO_FATAL_FAILURE(expectGet(
-            sstable,
-            multiBlockKey(index),
-            std::string(valueSize, 'a' + index)));
+        ASSERT_NO_FATAL_FAILURE(expectGet(sstable, multiBlockKey(index), std::string(valueSize, 'a' + index)));
     }
     expectMissing(sstable, "key-025");
     expectMissing(sstable, "key-z");
@@ -696,7 +598,7 @@ TEST(SSTableTest, SparseIndexStopsAtDeclaredSizeBeforeFooter)
 TEST(SSTableTest, ConstructorRejectsMissingFile)
 {
     const std::filesystem::path sstablePath("sstable_tests_missing.sst");
-    std::filesystem::remove(sstablePath);
+    const ScopedPathCleanup cleanup(sstablePath);
 
     EXPECT_THROW(SSTable sstable(sstablePath), std::runtime_error);
 }

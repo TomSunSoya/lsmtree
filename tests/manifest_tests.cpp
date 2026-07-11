@@ -1,59 +1,34 @@
-#include <cstdint>
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
-#include <fstream>
 #include <functional>
-#include <iterator>
 #include <set>
 #include <string>
-#include <utility>
 #include <vector>
 
 #include <gtest/gtest.h>
 
 #include "Manifest.h"
+#include "test_support.h"
 
 namespace
 {
-class ScopedPathCleanup
-{
-public:
-    explicit ScopedPathCleanup(std::filesystem::path path) : path(std::move(path))
-    {
-        std::filesystem::remove_all(this->path);
-    }
+using test_support::ScopedPathCleanup;
+using test_support::writeFile;
 
-    ~ScopedPathCleanup()
-    {
-        std::error_code ec;
-        std::filesystem::remove_all(path, ec);
-    }
-
-private:
-    std::filesystem::path path;
-};
-
-void writeFile(const std::filesystem::path &path, const std::string &content)
-{
-    std::ofstream out(path, std::ios::binary | std::ios::trunc);
-    ASSERT_TRUE(out.is_open()) << "expected file to open for writing: " << path;
-
-    out << content;
-    ASSERT_TRUE(out.good()) << "expected file write to succeed: " << path;
-}
-
-void expectTables(const Manifest &manifest, std::set<uint64_t, std::greater<>> expected)
+void expectTables(const Manifest& manifest, std::set<uint64_t, std::greater<>> expected)
 {
     EXPECT_EQ(expected, manifest.allTableNumbers());
 }
 
-void expectBytesEqual(const std::string &expected, const std::string &actual)
+void expectBytesEqual(const std::string& expected, const std::string& actual)
 {
     ASSERT_EQ(expected.size(), actual.size());
     for (std::size_t i = 0; i < expected.size(); ++i)
-        EXPECT_EQ(static_cast<unsigned char>(expected[i]), static_cast<unsigned char>(actual[i])) << "byte offset " << i;
+        EXPECT_EQ(static_cast<unsigned char>(expected[i]), static_cast<unsigned char>(actual[i]))
+            << "byte offset " << i;
 }
-}
+} // namespace
 
 TEST(ManifestTest, MissingManifestStartsWithEmptyTableSet)
 {
@@ -116,7 +91,7 @@ TEST(ManifestTest, SaveAndReloadPreservesArbitraryKeyBytes)
     }
 
     const Manifest reloaded(manifestPath);
-    const auto &level = reloaded.level(0);
+    const auto& level = reloaded.level(0);
     ASSERT_EQ(2, level.size());
     EXPECT_EQ(9, level[0].number);
     EXPECT_EQ(8, level[1].number);
@@ -137,7 +112,7 @@ TEST(ManifestTest, AddTableKeepsLevelZeroSortedByNewestTableNumber)
     manifest.addTable(7, "same-min", "same-max", 0);
     manifest.addTable(5, "same-min", "same-max", 0);
 
-    const auto &level0 = manifest.level(0);
+    const auto& level0 = manifest.level(0);
     ASSERT_EQ(3, level0.size());
     EXPECT_EQ(7, level0[0].number);
     EXPECT_EQ(5, level0[1].number);
@@ -156,7 +131,7 @@ TEST(ManifestTest, AddTableKeepsHigherLevelSortedByMinKey)
     manifest.addTable(12, "d", "f", 1);
 
     EXPECT_TRUE(manifest.level(0).empty());
-    const auto &level1 = manifest.level(1);
+    const auto& level1 = manifest.level(1);
     ASSERT_EQ(3, level1.size());
     EXPECT_EQ(10, level1[0].number);
     EXPECT_EQ("a", level1[0].minKey);
@@ -302,7 +277,7 @@ TEST(ManifestTest, ReplaceTablesPersistsCompactionResult)
     const Manifest reloaded(manifestPath);
     expectTables(reloaded, {8, 7, 1});
     EXPECT_TRUE(reloaded.level(0).empty());
-    const auto &level1 = reloaded.level(1);
+    const auto& level1 = reloaded.level(1);
     ASSERT_EQ(3, level1.size());
     EXPECT_EQ(7, level1[0].number);
     EXPECT_EQ("a", level1[0].minKey);

@@ -13,15 +13,10 @@ namespace
 {
 class VectorIterator final : public Iterator
 {
-public:
-    explicit VectorIterator(std::vector<Record> records) : records(std::move(records))
-    {
-    }
+  public:
+    explicit VectorIterator(std::vector<Record> records) : records(std::move(records)) {}
 
-    [[nodiscard]] bool valid() const override
-    {
-        return position < records.size();
-    }
+    [[nodiscard]] bool valid() const override { return position < records.size(); }
 
     [[nodiscard]] const Record& current() const override
     {
@@ -35,27 +30,21 @@ public:
             ++position;
     }
 
-private:
+  private:
     std::vector<Record> records;
     size_t position = 0;
 };
 
-Record value(std::string key, std::string content)
-{
-    return {std::move(key), Type::VALUE, std::move(content)};
-}
+Record value(std::string key, std::string content) { return {std::move(key), Type::VALUE, std::move(content)}; }
 
-Record tombstone(std::string key)
-{
-    return {std::move(key), Type::TOMBSTONE, ""};
-}
+Record tombstone(std::string key) { return {std::move(key), Type::TOMBSTONE, ""}; }
 
 std::unique_ptr<Iterator> source(std::vector<Record> records)
 {
     return std::make_unique<VectorIterator>(std::move(records));
 }
 
-void expectRecords(const std::vector<Record> &actual, const std::vector<Record> &expected)
+void expectRecords(const std::vector<Record>& actual, const std::vector<Record>& expected)
 {
     ASSERT_EQ(expected.size(), actual.size());
     for (size_t i = 0; i < expected.size(); ++i)
@@ -65,7 +54,7 @@ void expectRecords(const std::vector<Record> &actual, const std::vector<Record> 
         EXPECT_EQ(expected[i].value, actual[i].value) << "record index: " << i;
     }
 }
-}
+} // namespace
 
 TEST(MergeSortedTest, EmptyAndNullSourcesProduceNoRecords)
 {
@@ -84,14 +73,12 @@ TEST(MergeSortedTest, MergesDisjointSourcesInKeyOrder)
 
     const auto merged = mergeSorted(sources);
 
-    expectRecords(
-        merged,
-        {
-            value("alpha", "one"),
-            value("beta", "two"),
-            value("delta", "four"),
-            value("gamma", "three"),
-        });
+    expectRecords(merged, {
+                              value("alpha", "one"),
+                              value("beta", "two"),
+                              value("delta", "four"),
+                              value("gamma", "three"),
+                          });
 }
 
 TEST(MergeSortedTest, EarlierSourceWinsDuplicateAndLaterSourceContinues)
@@ -106,14 +93,12 @@ TEST(MergeSortedTest, EarlierSourceWinsDuplicateAndLaterSourceContinues)
 
     const auto merged = mergeSorted(sources);
 
-    expectRecords(
-        merged,
-        {
-            value("alpha", "new"),
-            value("beta", "kept"),
-            value("delta", "also-kept"),
-            value("gamma", "new-gamma"),
-        });
+    expectRecords(merged, {
+                              value("alpha", "new"),
+                              value("beta", "kept"),
+                              value("delta", "also-kept"),
+                              value("gamma", "new-gamma"),
+                          });
 }
 
 TEST(MergeSortedTest, KeepsTombstoneFromWinningSource)
@@ -124,10 +109,8 @@ TEST(MergeSortedTest, KeepsTombstoneFromWinningSource)
 
     const auto merged = mergeSorted(sources);
 
-    expectRecords(
-        merged,
-        {
-            tombstone("alpha"),
-            value("beta", "kept"),
-        });
+    expectRecords(merged, {
+                              tombstone("alpha"),
+                              value("beta", "kept"),
+                          });
 }

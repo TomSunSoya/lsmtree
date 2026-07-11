@@ -1,11 +1,12 @@
 #pragma once
-#include <cerrno>
+
+#include <cstddef>
+#include <cstdint>
 #include <filesystem>
-#include <format>
+#include <memory>
 #include <optional>
 #include <string>
-#include <system_error>
-#include <unistd.h>
+#include <string_view>
 #include <vector>
 
 enum class Type : uint8_t
@@ -44,148 +45,64 @@ struct Index
 struct TableMeta
 {
     uint64_t number;
-    std::string minKey, maxKey;
+    std::string minKey;
+    std::string maxKey;
 };
-
-inline std::optional<uint64_t> parseNumberedFile(
-    const std::string_view filename,
-    const std::string_view prefix,
-    const std::string_view suffix)
-{
-    if (filename.size() <= prefix.size() + suffix.size())
-        return std::nullopt;
-    if (!filename.starts_with(prefix))
-        return std::nullopt;
-    if (!filename.ends_with(suffix))
-        return std::nullopt;
-
-    const std::string numberStr{filename.substr(prefix.size(), filename.size() - prefix.size() - suffix.size())};
-    try
-    {
-        size_t pos = 0;
-        const auto value = std::stoull(numberStr, &pos, 10);
-        if (pos != numberStr.size())
-            return std::nullopt;
-
-        return value;
-    } catch (const std::exception &)
-    {
-        return std::nullopt;
-    }
-}
-
-class FdGuard
-{
-public:
-    explicit FdGuard(const int fd) : fd_(fd) {}
-
-    FdGuard(const FdGuard &) = delete;
-    FdGuard &operator=(const FdGuard &) = delete;
-
-    ~FdGuard()
-    {
-        if (fd_ >= 0)
-            ::close(fd_);
-    }
-
-    void setFd(const int fd)
-    {
-        if (fd_ >= 0)
-            ::close(fd_);
-        fd_ = fd;
-    }
-
-    [[nodiscard]] int get() const
-    {
-        return fd_;
-    }
-
-    void close()
-    {
-        if (fd_ < 0)
-            return;
-
-        if (::close(fd_) != 0)
-        {
-            const int err = errno;
-            throw std::system_error(err, std::generic_category(), "close failed");
-        }
-
-        fd_ = -1;
-    }
-
-private:
-    int fd_;
-};
-
-static void writeAll(const int fd, const void *data, std::size_t size)
-{
-    auto p = static_cast<const char *>(data);
-    while (size > 0)
-    {
-        const ssize_t n = ::write(fd, p, size);
-        if (n < 0)
-        {
-            if (errno == EINTR)
-                continue;
-
-            const int err = errno;
-            throw std::system_error(err, std::generic_category(), "write failed");
-        }
-
-        if (n == 0)
-            throw std::runtime_error("write returned 0");
-
-        p += n;
-        size -= static_cast<std::size_t>(n);
-    }
-}
-
-
-class FileWriter
-{
-public:
-    explicit FileWriter(std::filesystem::path path);
-    uint64_t add(const Record &);
-    void finish();
-    [[nodiscard]] int getFd() const;
-
-private:
-    std::filesystem::path path_, tempPath, parentDir;
-    FdGuard dataFd;
-};
-
-class Iterator
-{
-public:
-    virtual ~Iterator() = default;
-    [[nodiscard]] virtual bool valid() const = 0;
-    [[nodiscard]] virtual const Record &current() const = 0;
-    virtual void advance() = 0;
-};
-
-std::vector<Record> mergeSorted(std::vector<std::unique_ptr<Iterator>>& sources);
 
 constexpr std::string_view kWalPrefix = "wal_";
 constexpr std::string_view kWalSuffix = ".wal";
 constexpr std::string_view kSSTablePrefix = "sst_";
 constexpr std::string_view kSSTableSuffix = ".sst";
 
-inline std::filesystem::path walPath(const std::filesystem::path& dataDir, const uint64_t fileNumber)
-{
-    return dataDir / "wal" / std::format("{}{}{}", kWalPrefix, fileNumber, kWalSuffix);
-}
+[[nodiscard]] std::optional<uint64_t> parseNumberedFile(std::string_view filename, std::string_view prefix,
+                                                        std::string_view suffix);
 
-inline std::filesystem::path sstablePath(const std::filesystem::path& dataDir, const uint64_t fileNumber)
-{
-    return dataDir / "sstable" / std::format("{}{}{}", kSSTablePrefix, fileNumber, kSSTableSuffix);
-}
+[[nodiscard]] std::filesystem::path walPath(const std::filesystem::path& dataDir, uint64_t fileNumber);
+[[nodiscard]] std::filesystem::path sstablePath(const std::filesystem::path& dataDir, uint64_t fileNumber);
+void removeFile(const std::filesystem::path& path, const char* message);
+void writeAll(int fd, const void* data, std::size_t size);
 
-inline void removeFile(const std::filesystem::path& path, const char* message)
+class FdGuard
 {
-    if (::remove(path.c_str()))
-    {
-        const auto err = errno;
-        throw std::system_error(err, std::system_category(), message);
-    }
-}
+  public:
+    explicit FdGuard(int fd);
+    ~FdGuard();
+
+    FdGuard(const FdGuard&) = delete;
+    FdGuard& operator=(const FdGuard&) = delete;
+
+    void setFd(int fd);
+    [[nodiscard]] int get() const;
+    void close();
+
+  private:
+    int fd_;
+};
+
+class FileWriter
+{
+  public:
+    explicit FileWriter(std::filesystem::path path);
+
+    uint64_t add(const Record& record);
+    void finish();
+    [[nodiscard]] int getFd() const;
+
+  private:
+    std::filesystem::path path_;
+    std::filesystem::path temporaryPath_;
+    std::filesystem::path parentDirectory_;
+    FdGuard dataFile_;
+};
+
+class Iterator
+{
+  public:
+    virtual ~Iterator() = default;
+
+    [[nodiscard]] virtual bool valid() const = 0;
+    [[nodiscard]] virtual const Record& current() const = 0;
+    virtual void advance() = 0;
+};
+
+std::vector<Record> mergeSorted(std::vector<std::unique_ptr<Iterator>>& sources);

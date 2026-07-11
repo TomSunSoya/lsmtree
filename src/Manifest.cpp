@@ -1,21 +1,59 @@
 #include "Manifest.h"
 
 #include <algorithm>
-#include <format>
 #include <fstream>
 #include <iterator>
+#include <ranges>
 #include <stdexcept>
 #include <utility>
 
-#include "utils.h"
-
 namespace
 {
-    bool rangesOverlap(const TableMeta &table, std::string_view minKey, std::string_view maxKey)
-    {
-        return minKey <= table.maxKey && table.minKey <= maxKey;
-    }
+bool rangesOverlap(const TableMeta& table, const std::string_view minKey, const std::string_view maxKey)
+{
+    return minKey <= table.maxKey && table.minKey <= maxKey;
 }
+
+template <typename Value> void readValue(std::ifstream& input, Value& value, const char* errorMessage)
+{
+    input.read(reinterpret_cast<char*>(&value), sizeof(value));
+    if (!input)
+        throw std::ios_base::failure(errorMessage);
+}
+
+std::string readKey(std::ifstream& input, const char* sizeErrorMessage, const char* keyErrorMessage)
+{
+    uint32_t size = 0;
+    readValue(input, size, sizeErrorMessage);
+
+    std::string key(size, 0);
+    input.read(key.data(), size);
+    if (!input)
+        throw std::ios_base::failure(keyErrorMessage);
+    return key;
+}
+
+TableMeta readTable(std::ifstream& input)
+{
+    uint64_t number = 0;
+    readValue(input, number, "failed to read table's number");
+    std::string minKey = readKey(input, "failed to read minKey size", "failed to read minKey");
+    std::string maxKey = readKey(input, "failed to read maxKey size", "failed to read maxKey");
+    return {number, std::move(minKey), std::move(maxKey)};
+}
+
+template <typename Value> void writeValue(const FileWriter& writer, const Value& value)
+{
+    writeAll(writer.getFd(), &value, sizeof(value));
+}
+
+void writeKey(const FileWriter& writer, const std::string& key)
+{
+    const uint32_t size = key.length();
+    writeValue(writer, size);
+    writeAll(writer.getFd(), key.data(), key.length());
+}
+} // namespace
 
 // MANIFEST binary layout:
 //   uint64_t level_count
@@ -34,114 +72,69 @@ namespace
 // newlines, and embedded NUL bytes.
 Manifest::Manifest(std::filesystem::path path) : path_(std::move(path))
 {
-    if (std::ifstream ifs(path_, std::ios::binary); ifs)
-    {
-        uint64_t levelNumber = 0;
-        ifs.read(reinterpret_cast<char*>(&levelNumber), sizeof(levelNumber));
-        if (!ifs)
-            throw std::ios_base::failure("failed to read level number");
-        ifs.read(reinterpret_cast<char*>(&logNumber_), sizeof(logNumber_));
-        if (!ifs)
-            throw std::ios_base::failure("failed to read log number");
-        ifs.read(reinterpret_cast<char*>(&version_), sizeof(version_));
-        if (!ifs)
-            throw std::ios_base::failure("failed to read version");
-        ifs.read(reinterpret_cast<char*>(&next_), sizeof(next_));
-        if (!ifs)
-            throw std::ios_base::failure("failed to read next");
+    std::ifstream input(path_, std::ios::binary);
+    if (!input)
+        return;
 
-        levels.resize(levelNumber);
-        for (uint64_t i = 0; i < levelNumber; ++i)
-        {
-            uint64_t tableNumber;
-            ifs.read(reinterpret_cast<char*>(&tableNumber), sizeof(tableNumber));
-            if (!ifs)
-                throw std::ios_base::failure("failed to read table number");
-            if (tableNumber)
-            {
-                levels[i].resize(tableNumber);
-                for (uint64_t j = 0; j < tableNumber; ++j)
-                {
-                    uint64_t number = 0;
-                    ifs.read(reinterpret_cast<char*>(&number), sizeof(number));
-                    if (!ifs)
-                        throw std::ios_base::failure("failed to read table's number");
-                    uint32_t minKeySize = 0, maxKeySize = 0;
-                    ifs.read(reinterpret_cast<char*>(&minKeySize), sizeof(minKeySize));
-                    if (!ifs)
-                        throw std::ios_base::failure("failed to read minKey size");
-                    std::string minKey(minKeySize, 0);
-                    ifs.read(minKey.data(), minKeySize);
-                    if (!ifs)
-                        throw std::ios_base::failure("failed to read minKey");
-                    ifs.read(reinterpret_cast<char*>(&maxKeySize), sizeof(maxKeySize));
-                    if (!ifs)
-                        throw std::ios_base::failure("failed to read maxKey size");
-                    std::string maxKey(maxKeySize, 0);
-                    ifs.read(maxKey.data(), maxKeySize);
-                    if (!ifs)
-                        throw std::ios_base::failure("failed to read maxKey");
-                    levels[i][j] = {number, minKey, maxKey};
-                }
-            }
-        }
+    uint64_t levelCount = 0;
+    readValue(input, levelCount, "failed to read level number");
+    readValue(input, logNumber_, "failed to read log number");
+    readValue(input, formatVersion_, "failed to read version");
+    readValue(input, nextTableNumber_, "failed to read next");
+
+    levels_.resize(levelCount);
+    for (auto& level : levels_)
+    {
+        uint64_t tableCount = 0;
+        readValue(input, tableCount, "failed to read table number");
+        level.reserve(tableCount);
+        for (uint64_t tableIndex = 0; tableIndex < tableCount; ++tableIndex)
+            level.push_back(readTable(input));
     }
 }
 
-uint64_t Manifest::nextNumber() const
-{
-    return next_;
-}
+uint64_t Manifest::nextNumber() const { return nextTableNumber_; }
 
-uint64_t Manifest::allocateNumber()
-{
-    return next_++;
-}
+uint64_t Manifest::allocateNumber() { return nextTableNumber_++; }
 
-void Manifest::addTable(const uint64_t n, std::string_view minKey, std::string_view maxKey, uint32_t targetLevel)
+void Manifest::addTable(const uint64_t number, const std::string_view minKey, const std::string_view maxKey,
+                        const uint32_t targetLevel)
 {
-    TableMeta table{n, std::string(minKey), std::string(maxKey)};
-    if (targetLevel >= levels.size())
-        levels.resize(targetLevel + 1);
+    TableMeta table{number, std::string(minKey), std::string(maxKey)};
+    if (targetLevel >= levels_.size())
+        levels_.resize(targetLevel + 1);
 
-    auto &level = levels[targetLevel];
+    auto& level = levels_[targetLevel];
     if (targetLevel == 0)
     {
-        const auto pos = std::lower_bound(level.begin(), level.end(), n, [](const TableMeta &table_meta, const uint64_t value)
-        {
-            return table_meta.number > value;
-        });
-        level.insert(pos, std::move(table));
+        const auto position =
+            std::lower_bound(level.begin(), level.end(), number,
+                             [](const TableMeta& candidate, const uint64_t value) { return candidate.number > value; });
+        level.insert(position, std::move(table));
         return;
     }
 
-    const auto pos = std::lower_bound(level.begin(), level.end(), table.minKey, [](const TableMeta &table_meta, const std::string &key)
-    {
-        return table_meta.minKey < key;
-    });
-    if (pos != level.begin() && rangesOverlap(*std::prev(pos), table.minKey, table.maxKey))
+    const auto position =
+        std::lower_bound(level.begin(), level.end(), table.minKey,
+                         [](const TableMeta& candidate, const std::string& key) { return candidate.minKey < key; });
+    if (position != level.begin() && rangesOverlap(*std::prev(position), table.minKey, table.maxKey))
         throw std::invalid_argument("overlapping key range");
-    if (pos != level.end() && rangesOverlap(*pos, table.minKey, table.maxKey))
+    if (position != level.end() && rangesOverlap(*position, table.minKey, table.maxKey))
         throw std::invalid_argument("overlapping key range");
-    level.insert(pos, std::move(table));
+
+    level.insert(position, std::move(table));
 }
 
-void Manifest::replaceTables(const std::vector<uint64_t>& removed, const std::vector<TableMeta>& added, const uint32_t targetLevel)
+void Manifest::replaceTables(const std::vector<uint64_t>& removed, const std::vector<TableMeta>& added,
+                             const uint32_t targetLevel)
 {
-    if (!levels.empty())
+    for (auto& level : levels_)
     {
-        for (auto &level : levels)
-        {
-            std::erase_if(level, [&](const TableMeta &table_meta)
-            {
-                return std::ranges::find_if(removed, [&table_meta](const uint64_t remove)
-                {
-                    return table_meta.number == remove;
-                }) != removed.end();
-            });
-        }
+        std::erase_if(level, [&removed](const TableMeta& table)
+                      { return std::ranges::find(removed, table.number) != removed.end(); });
     }
-    for (const auto &[number, minKey, maxKey] : added)
+
+    for (const auto& [number, minKey, maxKey] : added)
         addTable(number, minKey, maxKey, targetLevel);
 }
 
@@ -149,69 +142,63 @@ void Manifest::save() const
 {
     FileWriter writer(path_);
 
-    const uint64_t levelNumber = levelCount();
-    writeAll(writer.getFd(), &levelNumber, sizeof(levelNumber));
-    writeAll(writer.getFd(), &logNumber_, sizeof(logNumber_));
-    writeAll(writer.getFd(), &version_, sizeof(version_));
-    writeAll(writer.getFd(), &next_, sizeof(next_));
+    const uint64_t levelCount = levels_.size();
+    writeValue(writer, levelCount);
+    writeValue(writer, logNumber_);
+    writeValue(writer, formatVersion_);
+    writeValue(writer, nextTableNumber_);
 
-    for (const auto &level : levels)
+    for (const auto& level : levels_)
     {
-        const uint64_t tableNumber = level.size();
-        writeAll(writer.getFd(), &tableNumber, sizeof(tableNumber));
-        for (const auto &[number, minKey, maxKey] : level)
+        const uint64_t tableCount = level.size();
+        writeValue(writer, tableCount);
+        for (const auto& [number, minKey, maxKey] : level)
         {
-            writeAll(writer.getFd(), &number, sizeof(number));
-            uint32_t minKeySize = minKey.length(), maxKeySize = maxKey.length();
-            writeAll(writer.getFd(), &minKeySize, sizeof(minKeySize));
-            writeAll(writer.getFd(), minKey.data(), minKey.length());
-            writeAll(writer.getFd(), &maxKeySize, sizeof(maxKeySize));
-            writeAll(writer.getFd(), maxKey.data(), maxKey.length());
+            writeValue(writer, number);
+            writeKey(writer, minKey);
+            writeKey(writer, maxKey);
         }
     }
     writer.finish();
 }
 
-const std::vector<TableMeta>& Manifest::level(size_t n) const
+const std::vector<TableMeta>& Manifest::level(const size_t number) const
 {
-    static constexpr std::vector<TableMeta> emptyLevels;
-    if (n >= levels.size())
-        return emptyLevels;
-    return levels[n];
+    static const std::vector<TableMeta> emptyLevel;
+    if (number >= levels_.size())
+        return emptyLevel;
+    return levels_[number];
 }
 
-size_t Manifest::levelCount() const
-{
-    return levels.size();
-}
+size_t Manifest::levelCount() const { return levels_.size(); }
 
 std::set<uint64_t, std::greater<>> Manifest::allTableNumbers() const
 {
     std::set<uint64_t, std::greater<>> tableNumbers;
-    for (const auto &level : levels)
-        for (const auto &table : level)
+    for (const auto& level : levels_)
+    {
+        for (const auto& table : level)
             tableNumbers.insert(table.number);
+    }
     return tableNumbers;
 }
 
-std::optional<TableMeta> Manifest::getTableMeta(const uint64_t n_level, std::string_view key) const
+std::optional<TableMeta> Manifest::getTableMeta(const uint64_t levelNumber, const std::string_view key) const
 {
-    if (n_level == 0)
+    if (levelNumber == 0)
         throw std::invalid_argument("Cannot get ZERO level");
-
-    if (n_level >= levels.size())
+    if (levelNumber >= levels_.size())
         return std::nullopt;
 
-    const auto &level = levels[n_level];
-    auto it = std::upper_bound(level.begin(), level.end(), key, [](const std::string_view value, const TableMeta &table)
-    {
-       return table.minKey > value;
-    });
+    const auto& level = levels_[levelNumber];
+    auto position =
+        std::upper_bound(level.begin(), level.end(), key,
+                         [](const std::string_view value, const TableMeta& table) { return table.minKey > value; });
 
-    if (it == level.begin())
+    if (position == level.begin())
         return std::nullopt;
-    it = std::prev(it);
-    if (key >= it->minKey && key <= it->maxKey)
-        return *it;
+    --position;
+    if (key >= position->minKey && key <= position->maxKey)
+        return *position;
     return std::nullopt;
 }

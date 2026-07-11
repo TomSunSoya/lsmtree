@@ -1,33 +1,38 @@
-#ifndef LSMTREE_DB_H
-#define LSMTREE_DB_H
+#pragma once
 
+#include <cstdint>
+#include <filesystem>
 #include <memory>
-#include "MemTable.h"
+#include <string>
+#include <string_view>
+#include <vector>
+
 #include "Manifest.h"
+#include "MemTable.h"
 
 class DB
 {
-public:
-    explicit DB(const std::filesystem::path &data_dir, uint64_t threshold_ = 5 * 1024 * 1024, uint64_t compactThreshold_ = 4, uint64_t sliceThreshold_ = 4 * 1024 * 1024);
+  public:
+    explicit DB(const std::filesystem::path& dataDirectory, uint64_t flushThreshold = 5 * 1024 * 1024,
+                uint64_t compactThreshold = 4, uint64_t sliceThreshold = 4 * 1024 * 1024);
 
-    bool put(const std::string &key, const std::string &value);
-    bool get(std::string_view key, std::string &value) const;
-    bool remove(const std::string &key);
+    bool put(const std::string& key, const std::string& value);
+    bool get(std::string_view key, std::string& value) const;
+    bool remove(const std::string& key);
+
     void flush();
     void compact();
     [[nodiscard]] std::vector<Record> scan(std::string_view start, std::string_view end) const;
 
-private:
-    std::unique_ptr<MemTable> actMemTable;
-    std::filesystem::path data_dir;
-    std::filesystem::path walFilePath;
-    uint64_t threshold;
-    std::unique_ptr<Manifest> manifest;
-    uint64_t compactThreshold;
-    uint64_t sliceThreshold;
+  private:
+    bool searchSSTables(std::string_view key, std::string& value) const;
+    Result searchTable(uint64_t tableNumber, std::string_view key, std::string& value) const;
 
-    bool searchFromSSTable(std::string_view key, std::string& value) const;
+    std::unique_ptr<MemTable> activeMemTable_;
+    std::filesystem::path dataDirectory_;
+    std::filesystem::path walFilePath_;
+    uint64_t flushThresholdBytes_;
+    std::unique_ptr<Manifest> manifest_;
+    uint64_t level0CompactionThreshold_;
+    uint64_t compactionSliceBytes_;
 };
-
-
-#endif //LSMTREE_DB_H

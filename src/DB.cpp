@@ -1,288 +1,320 @@
 #include "DB.h"
 
 #include <algorithm>
-#include <cerrno>
-#include <filesystem>
-#include <format>
 #include <iostream>
-#include <set>
-#include <stdexcept>
-#include <string_view>
-#include <system_error>
 #include <ranges>
-#include <unordered_set>
+#include <set>
+#include <span>
+#include <stdexcept>
 
 #include "SSTable.h"
 
 namespace
 {
-    namespace fs = std::filesystem;
+using TableNumbers = std::set<uint64_t, std::greater<>>;
 
-    void cleanupOrphanedWAL(const std::filesystem::path& dir, const uint64_t currentFileNumber)
+constexpr uint64_t kEncodedRecordHeaderSize = sizeof(uint8_t) + 2 * sizeof(uint32_t);
+
+void ensureDataDirectory(const std::filesystem::path& directory)
+{
+    if (!std::filesystem::exists(directory))
     {
-        if (!fs::exists(dir) || !fs::is_directory(dir))
-            return;
-
-        for (std::error_code ec; const auto &entry : fs::directory_iterator(dir, ec))
-        {
-            if (ec) return;
-            if (!entry.is_regular_file(ec))
-            {
-                ec.clear();
-                continue;
-            }
-
-            const auto number = parseNumberedFile(entry.path().filename().string(), kWalPrefix, kWalSuffix);
-            if (!number)
-                continue;
-            if (*number < currentFileNumber)
-                removeFile(entry.path(), "remove wal file failed");
-        }
+        std::filesystem::create_directories(directory);
+        return;
     }
 
-    void cleanupOrphanedSSTables(const std::filesystem::path& dir, const std::set<uint64_t, std::greater<>> &tables)
-    {
-        if (!fs::exists(dir) || !fs::is_directory(dir))
-            return;
+    if (!std::filesystem::is_directory(directory))
+        throw std::invalid_argument("Data directory is not a directory!");
+}
 
-        std::error_code ec;
-        for (const auto &entry : fs::directory_iterator(dir, ec))
+void cleanupOldWALFiles(const std::filesystem::path& directory, const uint64_t currentFileNumber)
+{
+    if (!std::filesystem::exists(directory) || !std::filesystem::is_directory(directory))
+        return;
+
+    std::error_code error;
+    for (const auto& entry : std::filesystem::directory_iterator(directory, error))
+    {
+        if (error)
+            return;
+        if (!entry.is_regular_file(error))
         {
-            if (ec) return;
-            if (!entry.is_regular_file(ec))
-                continue;
-            if (entry.path().extension() == ".sst")
-            {
-                const auto number = parseNumberedFile(entry.path().filename().string(), kSSTablePrefix, kSSTableSuffix);
-                if (!number || tables.contains(*number))
-                    continue;
-                removeFile(entry.path(), "remove sst file failed");
-            }
+            error.clear();
+            continue;
         }
+
+        const auto number = parseNumberedFile(entry.path().filename().string(), kWalPrefix, kWalSuffix);
+        if (number && *number < currentFileNumber)
+            removeFile(entry.path(), "remove wal file failed");
     }
 }
 
-DB::DB(const std::filesystem::path& data_dir, const uint64_t threshold_, const uint64_t compactThreshold_,
-       const uint64_t sliceThreshold_) : threshold(threshold_), compactThreshold(compactThreshold_),
-                                         sliceThreshold(sliceThreshold_)
+void cleanupUntrackedSSTables(const std::filesystem::path& directory, const TableNumbers& activeTables)
 {
-    namespace fs = std::filesystem;
-    if (!fs::exists(data_dir))
-        fs::create_directories(data_dir);
-    else if (!fs::is_directory(data_dir))
-        throw std::invalid_argument("Data directory is not a directory!");
+    if (!std::filesystem::exists(directory) || !std::filesystem::is_directory(directory))
+        return;
 
-    manifest = std::make_unique<Manifest>(data_dir / "MANIFEST");
+    std::error_code error;
+    for (const auto& entry : std::filesystem::directory_iterator(directory, error))
+    {
+        if (error)
+            return;
+        if (!entry.is_regular_file(error))
+            continue;
+        if (entry.path().extension() != ".sst")
+            continue;
 
-    const auto sstableDir = data_dir / "sstable";
-    const auto walDir = data_dir / "wal";
-    SSTable::cleanupOrphanedTemps(sstableDir);
-    cleanupOrphanedSSTables(sstableDir, manifest->allTableNumbers());
+        const auto number = parseNumberedFile(entry.path().filename().string(), kSSTablePrefix, kSSTableSuffix);
+        if (!number || activeTables.contains(*number))
+            continue;
+        removeFile(entry.path(), "remove sst file failed");
+    }
+}
 
-    this->data_dir = data_dir;
-    walFilePath = walPath(data_dir, manifest->logNumber());
-    cleanupOrphanedWAL(walDir, manifest->logNumber());
-    actMemTable = std::make_unique<MemTable>(walFilePath.string());
+TableNumbers selectCompactionTables(const Manifest& manifest)
+{
+    const auto& levelZero = manifest.level(0);
+    TableNumbers selected;
+    for (const TableMeta& table : levelZero)
+        selected.insert(table.number);
+
+    std::string levelZeroMin = levelZero.front().minKey;
+    std::string levelZeroMax = levelZero.front().maxKey;
+    for (const TableMeta& table : levelZero)
+    {
+        levelZeroMin = std::min(levelZeroMin, table.minKey);
+        levelZeroMax = std::max(levelZeroMax, table.maxKey);
+    }
+
+    for (const TableMeta& table : manifest.level(1))
+    {
+        if (table.minKey > levelZeroMax || table.maxKey < levelZeroMin)
+            continue;
+        selected.insert(table.number);
+    }
+    return selected;
+}
+
+std::vector<std::filesystem::path> tablePaths(const std::filesystem::path& dataDirectory,
+                                              const TableNumbers& tableNumbers)
+{
+    std::vector<std::filesystem::path> paths;
+    paths.reserve(tableNumbers.size());
+    for (const uint64_t number : tableNumbers)
+        paths.push_back(sstablePath(dataDirectory, number));
+    return paths;
+}
+
+std::vector<std::unique_ptr<Iterator>> openTableIterators(const std::vector<std::filesystem::path>& paths)
+{
+    std::vector<std::unique_ptr<Iterator>> iterators;
+    iterators.reserve(paths.size());
+    for (const auto& path : paths)
+        iterators.push_back(std::make_unique<SSTableIterator>(path));
+    return iterators;
+}
+
+uint64_t serializedRecordSize(const Record& record)
+{
+    return kEncodedRecordHeaderSize + record.key.length() + record.value.length();
+}
+
+TableMeta writeCompactionSlice(Manifest& manifest, const std::filesystem::path& dataDirectory,
+                               const std::span<Record> records)
+{
+    const uint64_t outputNumber = manifest.allocateNumber();
+    SSTable::addRecordToFile(records, sstablePath(dataDirectory, outputNumber));
+    return {outputNumber, records.front().key, records.back().key};
+}
+
+std::vector<TableMeta> writeCompactionOutput(Manifest& manifest, const std::filesystem::path& dataDirectory,
+                                             const std::span<Record> records, const uint64_t sliceThreshold)
+{
+    std::vector<TableMeta> outputTables;
+    uint64_t currentSliceBytes = 0;
+    size_t sliceBegin = 0;
+
+    for (size_t recordIndex = 0; recordIndex < records.size(); ++recordIndex)
+    {
+        currentSliceBytes += serializedRecordSize(records[recordIndex]);
+        if (currentSliceBytes <= sliceThreshold)
+            continue;
+
+        outputTables.push_back(
+            writeCompactionSlice(manifest, dataDirectory, records.subspan(sliceBegin, recordIndex - sliceBegin + 1)));
+        currentSliceBytes = 0;
+        sliceBegin = recordIndex + 1;
+    }
+
+    if (currentSliceBytes != 0)
+        outputTables.push_back(writeCompactionSlice(manifest, dataDirectory, records.subspan(sliceBegin)));
+    return outputTables;
+}
+
+bool overlapsScanRange(const TableMeta& table, const std::string_view start, const std::string_view end)
+{
+    return table.maxKey >= start && table.minKey < end;
+}
+
+std::vector<std::filesystem::path> selectScanTables(const Manifest& manifest,
+                                                    const std::filesystem::path& dataDirectory,
+                                                    const std::string_view start, const std::string_view end)
+{
+    std::vector<std::filesystem::path> paths;
+    for (size_t levelNumber = 0; levelNumber < manifest.levelCount(); ++levelNumber)
+    {
+        for (const TableMeta& table : manifest.level(levelNumber))
+        {
+            if (overlapsScanRange(table, start, end))
+                paths.push_back(sstablePath(dataDirectory, table.number));
+        }
+    }
+    return paths;
+}
+} // namespace
+
+DB::DB(const std::filesystem::path& dataDirectory, const uint64_t flushThreshold, const uint64_t compactThreshold,
+       const uint64_t sliceThreshold)
+    : flushThresholdBytes_(flushThreshold), level0CompactionThreshold_(compactThreshold),
+      compactionSliceBytes_(sliceThreshold)
+{
+    ensureDataDirectory(dataDirectory);
+
+    manifest_ = std::make_unique<Manifest>(dataDirectory / "MANIFEST");
+    const std::filesystem::path sstableDirectory = dataDirectory / "sstable";
+    const std::filesystem::path walDirectory = dataDirectory / "wal";
+    SSTable::cleanupOrphanedTemps(sstableDirectory);
+    cleanupUntrackedSSTables(sstableDirectory, manifest_->allTableNumbers());
+
+    dataDirectory_ = dataDirectory;
+    walFilePath_ = walPath(dataDirectory_, manifest_->logNumber());
+    cleanupOldWALFiles(walDirectory, manifest_->logNumber());
+    activeMemTable_ = std::make_unique<MemTable>(walFilePath_.string());
 }
 
 bool DB::put(const std::string& key, const std::string& value)
 {
-    if (!actMemTable->put(key, value))
+    if (!activeMemTable_->put(key, value))
         return false;
 
     try
     {
-        if (actMemTable->size_bytes() > threshold)
+        if (activeMemTable_->size_bytes() > flushThresholdBytes_)
             flush();
-    } catch (const std::exception &e)
+    }
+    catch (const std::exception& error)
     {
-        std::cerr << e.what() << std::endl;
+        std::cerr << error.what() << std::endl;
     }
     return true;
 }
 
-bool DB::get(std::string_view key, std::string& value) const
+bool DB::get(const std::string_view key, std::string& value) const
 {
-    const auto ret = actMemTable->get(key, value);
-    if (ret == Result::ABSENT)
-        return searchFromSSTable(key, value);
-    return ret == Result::VALUE;
+    const Result result = activeMemTable_->get(key, value);
+    if (result == Result::ABSENT)
+        return searchSSTables(key, value);
+    return result == Result::VALUE;
 }
 
-bool DB::remove(const std::string &key)
-{
-    return actMemTable->remove(key);
-}
+bool DB::remove(const std::string& key) { return activeMemTable_->remove(key); }
 
 void DB::flush()
 {
-    if (actMemTable->size() == 0)
+    if (activeMemTable_->size() == 0)
         return;
 
-    namespace fs = std::filesystem;
-    const auto fileNumber = manifest->allocateNumber();
-    const auto ssTablePath = sstablePath(data_dir, fileNumber);
-    if (!fs::exists(ssTablePath.parent_path()))
-        fs::create_directories(ssTablePath.parent_path());
+    const uint64_t tableNumber = manifest_->allocateNumber();
+    const std::filesystem::path tablePath = sstablePath(dataDirectory_, tableNumber);
+    if (!std::filesystem::exists(tablePath.parent_path()))
+        std::filesystem::create_directories(tablePath.parent_path());
 
-    const auto walFileNumber = manifest->allocateNumber();
-    manifest->setLogNumber(walFileNumber);
+    const uint64_t nextWALNumber = manifest_->allocateNumber();
+    manifest_->setLogNumber(nextWALNumber);
 
-    const auto [minKey, maxKey] = SSTable::build(*actMemTable, ssTablePath);
-    manifest->addTable(fileNumber, minKey, maxKey, 0);
-    manifest->save();
+    const auto [minKey, maxKey] = SSTable::build(*activeMemTable_, tablePath);
+    manifest_->addTable(tableNumber, minKey, maxKey, 0);
+    manifest_->save();
 
-    // old wal file number == current sstable file number
-    const auto oldWalFilePath = walFilePath;
-    const auto newWalFilePath = walPath(data_dir, walFileNumber);
-    actMemTable = std::make_unique<MemTable>(newWalFilePath.string());
-    walFilePath = newWalFilePath;
+    const std::filesystem::path oldWALPath = walFilePath_;
+    const std::filesystem::path nextWALPath = walPath(dataDirectory_, nextWALNumber);
+    activeMemTable_ = std::make_unique<MemTable>(nextWALPath.string());
+    walFilePath_ = nextWALPath;
 
-    removeFile(oldWalFilePath, "remove wal file failed");
+    removeFile(oldWALPath, "remove wal file failed");
 
-    if (manifest->level(0).size() > compactThreshold)
+    if (manifest_->level(0).size() > level0CompactionThreshold_)
         compact();
 }
 
 void DB::compact()
 {
-    namespace fs = std::filesystem;
-
-    const auto &level = manifest->level(0);
-    if (level.empty())
+    if (manifest_->level(0).empty())
         return;
 
-    const fs::path inputPath = data_dir / "sstable";
+    const TableNumbers selectedTables = selectCompactionTables(*manifest_);
+    const std::vector<uint64_t> removedTables(selectedTables.begin(), selectedTables.end());
+    const std::vector<std::filesystem::path> inputPaths = tablePaths(dataDirectory_, selectedTables);
 
-    std::set<uint64_t, std::greater<>> tables;
+    auto iterators = openTableIterators(inputPaths);
+    std::vector<Record> records = mergeSorted(iterators);
+    const std::vector<TableMeta> outputTables =
+        writeCompactionOutput(*manifest_, dataDirectory_, std::span(records), compactionSliceBytes_);
 
-    for (const auto &table : level)
-        tables.insert(table.number);
+    manifest_->replaceTables(removedTables, outputTables, 1);
+    manifest_->save();
 
-    std::string l0Min = level.front().minKey, l0Max = level.front().maxKey;
-    for (const auto &table : level)
-    {
-        l0Min = std::min(l0Min, table.minKey);
-        l0Max = std::max(l0Max, table.maxKey);
-    }
-
-    for (const auto &[number, minKey, maxKey] : manifest->level(1))
-    {
-        if (minKey > l0Max || maxKey < l0Min)
-            continue;
-        tables.insert(number);
-    }
-
-    const std::vector removed(tables.begin(), tables.end());
-
-    std::vector<fs::path> inputFiles;
-    inputFiles.reserve(tables.size());
-    for (const auto index : tables)
-        inputFiles.emplace_back(inputPath / std::format("sst_{}.sst", index));
-
-    std::vector<std::unique_ptr<Iterator>> cursors;
-    cursors.reserve(inputFiles.size());
-    for (const auto &path : inputFiles)
-        cursors.emplace_back(std::make_unique<SSTableIterator>(path));
-
-    auto records = mergeSorted(cursors);
-    std::span recordsSpan(records);
-    uint64_t fileSize = 0;
-    std::vector<TableMeta> tableMeta;
-    size_t j = 0;
-    for (size_t i = 0; i < recordsSpan.size(); ++i)
-    {
-        auto &record = recordsSpan[i];
-        // keySize(uint32_t) + valueSize(uint32_t) + type(uint8_t) = (4 + 4 + 1)
-        fileSize += 9 + record.key.length() + record.value.length();
-        if (fileSize > sliceThreshold)
-        {
-            const auto outFileNumber = manifest->allocateNumber();
-            const fs::path outPath = inputPath / std::format("sst_{}.sst", outFileNumber);
-            SSTable::addRecordToFile(recordsSpan.subspan(j, i-j+1), outPath);
-            tableMeta.emplace_back(outFileNumber, records[j].key, record.key);
-            fileSize = 0;
-            j = i+1;
-        }
-    }
-    if (fileSize)
-    {
-        const auto outFileNumber = manifest->allocateNumber();
-        const fs::path outPath = inputPath / std::format("sst_{}.sst", outFileNumber);
-        SSTable::addRecordToFile(recordsSpan.subspan(j), outPath);
-        tableMeta.emplace_back(outFileNumber, records[j].key, records.back().key);
-    }
-
-    manifest->replaceTables(removed, tableMeta, 1);
-    manifest->save();
-
-    for (const auto &oldFilePath : inputFiles)
-    {
-        removeFile(oldFilePath, "remove old sst file failed");
-    }
+    for (const auto& inputPath : inputPaths)
+        removeFile(inputPath, "remove old sst file failed");
 }
 
-std::vector<Record> DB::scan(std::string_view start, std::string_view end) const
+std::vector<Record> DB::scan(const std::string_view start, const std::string_view end) const
 {
-    std::vector<std::unique_ptr<Iterator>> iters;
-    iters.emplace_back(std::make_unique<MemTableIterator>(*actMemTable));
+    std::vector<std::unique_ptr<Iterator>> iterators;
+    iterators.push_back(std::make_unique<MemTableIterator>(*activeMemTable_));
 
-    namespace fs = std::filesystem;
-    std::vector<fs::path> inputFiles;
+    const auto inputPaths = selectScanTables(*manifest_, dataDirectory_, start, end);
+    for (const auto& path : inputPaths)
+        iterators.push_back(std::make_unique<SSTableIterator>(path.string()));
 
-    for (uint64_t i = 0; i < manifest->levelCount(); ++i)
-    {
-        for (const auto &[number, minKey, maxKey] : manifest->level(i))
-        {
-            if (maxKey < start || end <= minKey)
-                continue;
-            inputFiles.emplace_back(sstablePath(data_dir, number));
-        }
-    }
-
-    std::ranges::transform(inputFiles, std::back_inserter(iters), [](const fs::path &p)
-    {
-        return std::make_unique<SSTableIterator>(p.string());
-    });
-
-    auto finalResult = mergeSorted(iters) | std::ranges::views::filter([&start, &end](const Record &record)
-    {
-        return record.key >= start && record.key < end && record.type == Type::VALUE;
-    });
-    return std::ranges::to<std::vector>(finalResult);
+    auto visibleRecords =
+        mergeSorted(iterators) |
+        std::views::filter([start, end](const Record& record)
+                           { return record.key >= start && record.key < end && record.type == Type::VALUE; });
+    return std::ranges::to<std::vector>(visibleRecords);
 }
 
-bool DB::searchFromSSTable(const std::string_view key, std::string& value) const
+Result DB::searchTable(const uint64_t tableNumber, const std::string_view key, std::string& value) const
 {
-    const auto searchInFile = [this, key, &value] (const uint64_t index)
-    {
-        const auto filePath = sstablePath(data_dir, index);
-        const SSTable cur_table(filePath);
-        return cur_table.get(key, value);
-    };
+    const SSTable table(sstablePath(dataDirectory_, tableNumber));
+    return table.get(key, value);
+}
 
-    for (const auto &level0 = manifest->level(0);
-        const auto &[number, minKey, maxKey] : level0)
+bool DB::searchSSTables(const std::string_view key, std::string& value) const
+{
+    for (const TableMeta& table : manifest_->level(0))
     {
-        if (key < minKey || key > maxKey)
+        if (key < table.minKey || key > table.maxKey)
             continue;
-        const auto ret = searchInFile(number);
-        if (ret == Result::VALUE)
+
+        const Result result = searchTable(table.number, key, value);
+        if (result == Result::VALUE)
             return true;
-        if (ret == Result::TOMBSTONE)
+        if (result == Result::TOMBSTONE)
             return false;
     }
 
-    for (size_t i = 1; i < manifest->levelCount(); ++i)
+    for (size_t levelNumber = 1; levelNumber < manifest_->levelCount(); ++levelNumber)
     {
-        if (const auto table = manifest->getTableMeta(i, key); table)
-        {
-            const auto ret = searchInFile(table->number);
-            if (ret == Result::VALUE)
-                return true;
-            if (ret == Result::TOMBSTONE)
-                return false;
-        }
+        const auto table = manifest_->getTableMeta(levelNumber, key);
+        if (!table)
+            continue;
+
+        const Result result = searchTable(table->number, key, value);
+        if (result == Result::VALUE)
+            return true;
+        if (result == Result::TOMBSTONE)
+            return false;
     }
     return false;
 }

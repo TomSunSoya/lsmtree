@@ -1,27 +1,27 @@
-#ifndef LSMTREE_BLOOMFILTER_H
-#define LSMTREE_BLOOMFILTER_H
+#pragma once
 
-#include <vector>
+#include <cstddef>
+#include <cstdint>
 #include <span>
+#include <string_view>
+#include <vector>
 
 class BloomFilter
 {
-public:
-    static std::vector<std::byte> Serialize(const BloomFilter &bloom_filter);
+  public:
+    static std::vector<std::byte> Serialize(const BloomFilter& bloomFilter);
     static BloomFilter fromBytes(std::span<const std::byte> data);
 
-    explicit BloomFilter(unsigned int n, double p);
-    BloomFilter(uint64_t m, uint64_t k);
+    explicit BloomFilter(unsigned int expectedEntries, double falsePositiveProbability);
+    BloomFilter(uint64_t bitCount, uint64_t hashCount);
+
     void add(std::string_view key);
     [[nodiscard]] bool mightContain(std::string_view key) const;
 
-private:
-    std::vector<uint64_t> bit;
-    uint64_t m;
-    uint64_t k;
+  private:
+    [[nodiscard]] uint64_t getBitPosition(std::string_view key, uint64_t hashIndex) const;
 
-    [[nodiscard]] uint64_t getBitPosition(std::string_view key, uint64_t pos) const;
+    std::vector<uint64_t> words_;
+    uint64_t bitCount_;
+    uint64_t hashCount_;
 };
-
-
-#endif //LSMTREE_BLOOMFILTER_H

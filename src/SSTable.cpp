@@ -3,326 +3,303 @@
 #include <algorithm>
 #include <array>
 #include <cassert>
-#include <cstdint>
 #include <cstring>
-#include <filesystem>
-#include <fstream>
-#include <optional>
-#include <queue>
+#include <iterator>
 #include <stdexcept>
-#include <string>
-#include <string_view>
 #include <utility>
-#include <vector>
+
+#include "MemTable.h"
 
 namespace
 {
-    namespace fs = std::filesystem;
+constexpr uint64_t kRecordHeaderSize = sizeof(char) + 2 * sizeof(uint32_t);
+constexpr uint64_t kIndexMetadataSize = sizeof(uint32_t) + sizeof(uint64_t);
+constexpr size_t kFooterSize = 3 * sizeof(uint64_t);
 
-    constexpr std::string_view kSSTablePrefix = "sst_";
-    constexpr auto kSSTableSuffix = ".sst";
-    constexpr uint64_t kRecordHeaderSize = sizeof(char) + 2 * sizeof(uint32_t);
-    constexpr uint64_t kIndexMetadataSize = sizeof(uint32_t) + sizeof(uint64_t);
-    constexpr size_t kFooterSize = 3 * sizeof(uint64_t);
+struct Footer
+{
+    uint64_t recordsSize;
+    uint64_t bloomSize;
+    uint64_t indexSize;
+};
 
-    struct Footer
-    {
-        uint64_t recordsSize;
-        uint64_t bloomSize;
-        uint64_t indexSize;
-    };
+Footer readFooter(std::ifstream& input)
+{
+    input.seekg(-static_cast<std::streamoff>(kFooterSize), std::ios::end);
 
-    Footer readFooter(std::ifstream &input)
-    {
-        input.seekg(-static_cast<std::streamoff>(kFooterSize), std::ios::end);
+    std::array<std::byte, kFooterSize> buffer;
+    input.read(reinterpret_cast<char*>(buffer.data()), static_cast<std::streamsize>(buffer.size()));
 
-        std::array<std::byte, kFooterSize> buffer;
-        input.read(reinterpret_cast<char*>(buffer.data()), static_cast<std::streamsize>(buffer.size()));
-
-        Footer footer{};
-        std::memcpy(&footer.recordsSize, buffer.data(), sizeof(footer.recordsSize));
-        std::memcpy(&footer.bloomSize, buffer.data() + sizeof(footer.recordsSize), sizeof(footer.bloomSize));
-        std::memcpy(
-            &footer.indexSize,
-            buffer.data() + sizeof(footer.recordsSize) + sizeof(footer.bloomSize),
-            sizeof(footer.indexSize));
-        return footer;
-    }
-
-    uint64_t sstableNumberOrZero(const fs::path &path)
-    {
-        return parseNumberedFile(path.filename().string(), kSSTablePrefix, kSSTableSuffix).value_or(0);
-    }
-
-    uint64_t serializedRecordSize(const std::optional<Record> &record)
-    {
-        if (!record)
-            return 0;
-        return kRecordHeaderSize + record->key.size() + record->value.size();
-    }
-
-    uint64_t serializedIndexSize(const Index &index)
-    {
-        return kIndexMetadataSize + index.key.size();
-    }
+    Footer footer{};
+    std::memcpy(&footer.recordsSize, buffer.data(), sizeof(footer.recordsSize));
+    std::memcpy(&footer.bloomSize, buffer.data() + sizeof(footer.recordsSize), sizeof(footer.bloomSize));
+    std::memcpy(&footer.indexSize, buffer.data() + sizeof(footer.recordsSize) + sizeof(footer.bloomSize),
+                sizeof(footer.indexSize));
+    return footer;
 }
 
-std::pair<std::string, std::string> SSTable::build(const MemTable &mt, const std::filesystem::path &path)
+std::optional<Record> readRecord(std::ifstream& input)
+{
+    char type = 0;
+    if (!input.read(&type, sizeof(type)))
+        return std::nullopt;
+
+    uint32_t keySize = 0;
+    uint32_t valueSize = 0;
+    if (!input.read(reinterpret_cast<char*>(&keySize), sizeof(keySize)))
+        return std::nullopt;
+    if (!input.read(reinterpret_cast<char*>(&valueSize), sizeof(valueSize)))
+        return std::nullopt;
+
+    std::string key(keySize, '\0');
+    std::string value(valueSize, '\0');
+    if (!input.read(key.data(), keySize))
+        return std::nullopt;
+    if (!input.read(value.data(), valueSize))
+        return std::nullopt;
+
+    return Record{std::move(key), static_cast<Type>(type), std::move(value)};
+}
+
+std::optional<Index> readIndex(std::ifstream& input)
+{
+    uint32_t keySize = 0;
+    if (!input.read(reinterpret_cast<char*>(&keySize), sizeof(keySize)))
+        return std::nullopt;
+
+    std::string key(keySize, '\0');
+    if (!input.read(key.data(), keySize))
+        return std::nullopt;
+
+    uint64_t offset = 0;
+    if (!input.read(reinterpret_cast<char*>(&offset), sizeof(offset)))
+        return std::nullopt;
+
+    return Index{keySize, std::move(key), offset};
+}
+
+uint64_t serializedRecordSize(const std::optional<Record>& record)
+{
+    if (!record)
+        return 0;
+    return kRecordHeaderSize + record->key.size() + record->value.size();
+}
+
+uint64_t serializedIndexSize(const Index& index) { return kIndexMetadataSize + index.key.size(); }
+
+uint64_t writeIndex(FileWriter& writer, const Index& index)
+{
+    writeAll(writer.getFd(), &index.keySize, sizeof(index.keySize));
+    writeAll(writer.getFd(), index.key.data(), index.key.size());
+    writeAll(writer.getFd(), &index.offset, sizeof(index.offset));
+    return serializedIndexSize(index);
+}
+
+void writeFooter(FileWriter& writer, const uint64_t recordsSize, const uint64_t bloomSize, const uint64_t indexSize)
+{
+    writeAll(writer.getFd(), &recordsSize, sizeof(recordsSize));
+    writeAll(writer.getFd(), &bloomSize, sizeof(bloomSize));
+    writeAll(writer.getFd(), &indexSize, sizeof(indexSize));
+}
+} // namespace
+
+std::pair<std::string, std::string> SSTable::build(const MemTable& memTable, const std::filesystem::path& path)
 {
     if (std::filesystem::exists(path))
         throw std::runtime_error("SSTable file already exists!");
 
     std::vector<Record> records;
-    records.reserve(mt.size());
-    for (auto &[key, entry] : mt)
+    records.reserve(memTable.size());
+    for (const auto& [key, entry] : memTable)
         records.emplace_back(key, entry.type, entry.value);
 
     addRecordToFile(records, path);
     return {records.front().key, records.back().key};
 }
 
-void SSTable::cleanupOrphanedTemps(const std::filesystem::path& dir)
+void SSTable::cleanupOrphanedTemps(const std::filesystem::path& directory)
 {
-    std::error_code ec;
-    if (!fs::exists(dir, ec) || !fs::is_directory(dir, ec))
+    std::error_code error;
+    if (!std::filesystem::exists(directory, error) || !std::filesystem::is_directory(directory, error))
         return;
 
-    for (const auto &entry : fs::directory_iterator(dir, ec))
+    for (const auto& entry : std::filesystem::directory_iterator(directory, error))
     {
-        if (ec)
+        if (error)
             return;
-
-        if (!entry.is_regular_file(ec))
+        if (!entry.is_regular_file(error))
             continue;
 
-        const fs::path &path = entry.path();
+        const std::filesystem::path& path = entry.path();
         if (path.extension() != ".tmp")
             continue;
 
-        fs::remove(path, ec);
-        if (ec)
-            throw std::runtime_error("remove failed: " + path.string() + ", reason: " + ec.message());
+        std::filesystem::remove(path, error);
+        if (error)
+            throw std::runtime_error("remove failed: " + path.string() + ", reason: " + error.message());
     }
 }
 
-SSTable::SSTable(std::filesystem::path path) : path(std::move(path))
+SSTable::SSTable(std::filesystem::path path) : path_(std::move(path))
 {
-    namespace fs = std::filesystem;
-    if (!fs::exists(this->path) || !fs::is_regular_file(this->path))
-        throw std::runtime_error("SSTable file is not a regular file: " + this->path.string());
+    if (!std::filesystem::exists(path_) || !std::filesystem::is_regular_file(path_))
+        throw std::runtime_error("SSTable file is not a regular file: " + path_.string());
 
-    std::ifstream ifs{this->path, std::ios::binary};
-    if (!ifs)
-        throw std::runtime_error("Could not open file: " + this->path.string());
+    std::ifstream input(path_, std::ios::binary);
+    if (!input)
+        throw std::runtime_error("Could not open file: " + path_.string());
 
-    const auto footer = readFooter(ifs);
-    recordsSize = footer.recordsSize;
-    bloomSize = footer.bloomSize;
-    indexSize = footer.indexSize;
+    const Footer footer = readFooter(input);
+    recordsSize_ = footer.recordsSize;
+    bloomSize_ = footer.bloomSize;
+    indexSize_ = footer.indexSize;
 
-    ifs.seekg(recordsSize, std::ios::beg);
-    std::vector<std::byte> bloomBytes(bloomSize);
-    ifs.read(reinterpret_cast<char*>(bloomBytes.data()), bloomSize);
-    bloomFilter = std::make_unique<BloomFilter>(BloomFilter::fromBytes(bloomBytes));
+    input.seekg(recordsSize_, std::ios::beg);
+    std::vector<std::byte> bloomBytes(bloomSize_);
+    input.read(reinterpret_cast<char*>(bloomBytes.data()), bloomSize_);
+    bloomFilter_ = std::make_unique<BloomFilter>(BloomFilter::fromBytes(bloomBytes));
 }
 
-Result SSTable::get(const std::string_view key, std::string &value) const
+Result SSTable::get(const std::string_view key, std::string& value) const
 {
-    if (!std::filesystem::exists(path) || !bloomFilter->mightContain(key))
+    if (!std::filesystem::exists(path_) || !bloomFilter_->mightContain(key))
         return Result::ABSENT;
 
-    std::ifstream ifs{path, std::ios::binary};
-    if (!ifs.is_open())
+    std::ifstream input(path_, std::ios::binary);
+    if (!input.is_open())
         return Result::ABSENT;
 
     const auto block = getBlock(key);
     if (!block)
         return Result::ABSENT;
 
-    const auto &[firstIndex, blockEnd] = *block;
-    ifs.seekg(firstIndex.offset, std::ios::beg);
+    const auto& [firstIndex, blockEnd] = *block;
+    input.seekg(firstIndex.offset, std::ios::beg);
     uint64_t currentOffset = firstIndex.offset;
     while (currentOffset < blockEnd)
     {
-        auto record = readOneRecord(ifs);
+        const auto record = readRecord(input);
         if (!record)
             break;
+
         currentOffset += serializedRecordSize(record);
-        if (record->key == key)
-        {
-            if (record->type != Type::VALUE)
-                return Result::TOMBSTONE;
-            value = record->value;
-            return Result::VALUE;
-        }
+        if (record->key != key)
+            continue;
+
+        if (record->type != Type::VALUE)
+            return Result::TOMBSTONE;
+        value = record->value;
+        return Result::VALUE;
     }
     return Result::ABSENT;
 }
 
-std::optional<std::pair<Index, uint64_t>> SSTable::getBlock(const std::string_view key) const
+std::vector<Index> SSTable::readSparseIndex() const
 {
-    std::ifstream ifs{path, std::ios::binary};
-    if (!ifs)
-        throw std::runtime_error("Could not open file: " + path.string());
+    std::ifstream input(path_, std::ios::binary);
+    if (!input)
+        throw std::runtime_error("Could not open file: " + path_.string());
 
+    input.seekg(recordsSize_ + bloomSize_, std::ios::beg);
     std::vector<Index> indices;
-    ifs.seekg(recordsSize + bloomSize, std::ios::beg);
-    uint64_t indexBytesRead = 0;
-    while (indexBytesRead < indexSize)
+    uint64_t bytesRead = 0;
+    while (bytesRead < indexSize_)
     {
-        const auto index = readOneIndex(ifs);
+        const auto index = readIndex(input);
         if (!index)
             break;
 
         indices.push_back(*index);
-        indexBytesRead += serializedIndexSize(*index);
+        bytesRead += serializedIndexSize(*index);
     }
-
-    const auto it = std::upper_bound(indices.begin(), indices.end(), key,
-        [](const std::string_view value, const Index &item)
-    {
-        return item.key > value;
-    });
-
-    if (it == indices.begin())
-        return std::nullopt;
-
-    const uint64_t blockEnd = it == indices.end() ? recordsSize : it->offset;
-    return std::make_pair(*std::prev(it), blockEnd);
+    return indices;
 }
 
-std::optional<Record> SSTable::readOneRecord(std::ifstream& ifs)
+std::optional<std::pair<Index, uint64_t>> SSTable::getBlock(const std::string_view key) const
 {
-    char type = 0;
-    if (!ifs.read(&type, sizeof(type)))
+    const std::vector<Index> indices = readSparseIndex();
+    const auto position =
+        std::upper_bound(indices.begin(), indices.end(), key,
+                         [](const std::string_view value, const Index& index) { return index.key > value; });
+
+    if (position == indices.begin())
         return std::nullopt;
 
-    uint32_t keySize = 0;
-    uint32_t valueSize = 0;
-    if (!ifs.read(reinterpret_cast<char*>(&keySize), sizeof(keySize)))
-        return std::nullopt;
-    if (!ifs.read(reinterpret_cast<char*>(&valueSize), sizeof(valueSize)))
-        return std::nullopt;
-
-    std::string key(keySize, '\0');
-    std::string value(valueSize, '\0');
-    if (!ifs.read(key.data(), keySize))
-        return std::nullopt;
-    if (!ifs.read(value.data(), valueSize))
-        return std::nullopt;
-
-    Record record{};
-    record.key = std::move(key);
-    record.value = std::move(value);
-    record.type = static_cast<Type>(type);
-    return record;
+    const uint64_t blockEnd = position == indices.end() ? recordsSize_ : position->offset;
+    return std::make_pair(*std::prev(position), blockEnd);
 }
 
-std::optional<Index> SSTable::readOneIndex(std::ifstream& ifs)
-{
-    uint32_t keySize = 0;
-    if (!ifs.read(reinterpret_cast<char*>(&keySize), sizeof(keySize)))
-        return std::nullopt;
-
-    std::string key(keySize, '\0');
-    if (!ifs.read(key.data(), keySize))
-        return std::nullopt;
-
-    uint64_t offset = 0;
-    if (!ifs.read(reinterpret_cast<char*>(&offset), sizeof(offset)))
-        return std::nullopt;
-
-    return Index{keySize, std::move(key), offset};
-}
-
-void SSTable::addRecordToFile(std::span<Record> records, const std::filesystem::path& path)
+void SSTable::addRecordToFile(const std::span<Record> records, const std::filesystem::path& path)
 {
     if (records.empty())
         throw std::runtime_error("Records cannot be empty");
+
     BloomFilter bloomFilter(records.size(), 0.01);
     FileWriter writer(path);
 
     std::vector<Index> indices;
     uint64_t recordsSize = 0;
     uint64_t currentBlockSize = 0;
-    for (const auto & [key, type, value] : records)
+    for (const auto& [key, type, value] : records)
     {
-        if (recordsSize == 0 || currentBlockSize > BLOCK_SIZE)
+        if (recordsSize == 0 || currentBlockSize > kBlockSize)
         {
             currentBlockSize = 0;
             indices.emplace_back(key.size(), key, recordsSize);
         }
 
-        const auto bytesWritten = writer.add({key, type, value});
+        const uint64_t bytesWritten = writer.add({key, type, value});
         recordsSize += bytesWritten;
         currentBlockSize += bytesWritten;
         bloomFilter.add(key);
     }
 
-    const auto bloomBytes = BloomFilter::Serialize(bloomFilter);
+    const std::vector<std::byte> bloomBytes = BloomFilter::Serialize(bloomFilter);
     writeAll(writer.getFd(), bloomBytes.data(), bloomBytes.size());
 
-    uint64_t indicesSize = 0;
-    for (const auto & [keySize, key, offset] : indices)
-    {
-        writeAll(writer.getFd(), &keySize, sizeof(keySize));
-        writeAll(writer.getFd(), key.data(), key.size());
-        writeAll(writer.getFd(), &offset, sizeof(offset));
-        indicesSize += sizeof(keySize) + key.size() + sizeof(offset);
-    }
+    uint64_t indexSize = 0;
+    for (const Index& index : indices)
+        indexSize += writeIndex(writer, index);
 
-    writeAll(writer.getFd(), &recordsSize, sizeof(recordsSize));
-
-    const auto bloomSize = bloomBytes.size();
-    writeAll(writer.getFd(), &bloomSize, sizeof(bloomSize));
-
-    writeAll(writer.getFd(), &indicesSize, sizeof(indicesSize));
-
+    writeFooter(writer, recordsSize, bloomBytes.size(), indexSize);
     writer.finish();
 }
 
-SSTableIterator::SSTableIterator(std::filesystem::path path) : path(std::move(path))
+SSTableIterator::SSTableIterator(std::filesystem::path path)
 {
-    if (!std::filesystem::exists(this->path))
+    if (!std::filesystem::exists(path))
         throw std::runtime_error("Invalid path");
 
-    ifs.open(this->path, std::ios::binary);
-    if (!ifs.is_open())
+    input_.open(path, std::ios::binary);
+    if (!input_.is_open())
         throw std::runtime_error("Failed to open SSTable file!");
 
-    const auto footer = readFooter(ifs);
-    recordsSize = footer.recordsSize;
-    bloomSize = footer.bloomSize;
-    indexSize = footer.indexSize;
+    recordsSize_ = readFooter(input_).recordsSize;
+    input_.seekg(0, std::ios::beg);
 
-    ifs.seekg(0, std::ios::beg);
-
-    if (currentPos < recordsSize)
+    if (currentPosition_ < recordsSize_)
     {
-        currentRecord = SSTable::readOneRecord(ifs);
-        currentPos += serializedRecordSize(currentRecord);
+        currentRecord_ = readRecord(input_);
+        currentPosition_ += serializedRecordSize(currentRecord_);
     }
 }
 
-bool SSTableIterator::valid() const
-{
-    return currentRecord.has_value();
-}
+bool SSTableIterator::valid() const { return currentRecord_.has_value(); }
 
 const Record& SSTableIterator::current() const
 {
     assert(valid());
-    return *currentRecord;
+    return *currentRecord_;
 }
 
 void SSTableIterator::advance()
 {
-    if (valid() && currentPos < recordsSize)
+    if (valid() && currentPosition_ < recordsSize_)
     {
-        currentRecord = SSTable::readOneRecord(ifs);
-        currentPos += serializedRecordSize(currentRecord);
+        currentRecord_ = readRecord(input_);
+        currentPosition_ += serializedRecordSize(currentRecord_);
         return;
     }
 
-    currentRecord = std::nullopt;
+    currentRecord_.reset();
 }

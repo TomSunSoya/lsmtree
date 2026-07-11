@@ -14,7 +14,7 @@ std::string indexedKey(const std::string_view prefix, const size_t index)
 {
     return std::string(prefix) + std::to_string(index);
 }
-}
+} // namespace
 
 TEST(BloomFilterTest, EmptyFilterRejectsKeys)
 {
@@ -35,10 +35,10 @@ TEST(BloomFilterTest, AddedKeysNeverBecomeFalseNegatives)
         std::string("embedded\0null", 13),
     };
 
-    for (const auto &key : keys)
+    for (const auto& key : keys)
         filter.add(key);
 
-    for (const auto &key : keys)
+    for (const auto& key : keys)
         EXPECT_TRUE(filter.mightContain(key)) << "false negative for key of size " << key.size();
 }
 
@@ -88,7 +88,7 @@ TEST(BloomFilterTest, SerializationRoundTripPreservesMembership)
     EXPECT_EQ(0, bytes.size() % sizeof(uint64_t));
     EXPECT_EQ(bytes, BloomFilter::Serialize(restored));
 
-    for (const auto &key : insertedKeys)
+    for (const auto& key : insertedKeys)
         ASSERT_TRUE(restored.mightContain(key)) << "false negative after restoring key: " << key;
 
     for (size_t i = 0; i < expectedEntries; ++i)

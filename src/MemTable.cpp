@@ -1,290 +1,296 @@
 #include "MemTable.h"
 
-#include <cerrno>
 #include <cassert>
-#include <filesystem>
+#include <cctype>
+#include <cerrno>
 #include <fcntl.h>
+#include <fstream>
 #include <iostream>
 #include <sstream>
 #include <stdexcept>
 #include <system_error>
+#include <unistd.h>
 
 namespace
 {
-std::string makeWALRecord(const std::string &key, const std::string &value, const Type valueType)
+std::string encodeWALRecord(const std::string& key, const std::string& value, const Type type)
 {
-    return (valueType == Type::VALUE ? "P," : "D,") + std::to_string(key.size()) + "," + key + "=" + std::to_string(value.size()) + "," + value + "\n";
-}
+    const std::string operation = type == Type::VALUE ? "P," : "D,";
+    return operation + std::to_string(key.size()) + "," + key + "=" + std::to_string(value.size()) + "," + value + "\n";
 }
 
-MemTable::MemTable(std::string_view logFilePath) : log_path(logFilePath), writer(logFilePath), current_size(0)
+class WALParser
+{
+  public:
+    explicit WALParser(const std::string_view content) : content_(content) {}
+
+    std::vector<std::pair<std::string, Entry>> parse(size_t& lastGoodOffset)
+    {
+        std::vector<std::pair<std::string, Entry>> records;
+        while (position_ < content_.size())
+        {
+            lastGoodOffset = position_;
+
+            std::string_view operation;
+            if (!readField(1, operation) || !consume(','))
+                return records;
+            if (operation != "D" && operation != "P")
+                return records;
+
+            std::string_view key;
+            if (!readLengthPrefixedField(key, '='))
+                return records;
+
+            std::string_view value;
+            if (!readLengthPrefixedField(value, '\n'))
+                return records;
+
+            const Type type = operation == "P" ? Type::VALUE : Type::TOMBSTONE;
+            records.emplace_back(std::string(key), Entry{type, std::string(value)});
+        }
+
+        lastGoodOffset = position_;
+        return records;
+    }
+
+  private:
+    bool readLength(size_t& length)
+    {
+        const size_t begin = position_;
+        while (position_ < content_.size() && std::isdigit(static_cast<unsigned char>(content_[position_])))
+            ++position_;
+
+        if (begin == position_ || position_ == content_.size())
+            return false;
+
+        try
+        {
+            length = std::stoull(std::string(content_.substr(begin, position_ - begin)));
+        }
+        catch (const std::out_of_range&)
+        {
+            return false;
+        }
+        return true;
+    }
+
+    bool consume(const char expected)
+    {
+        if (position_ >= content_.size() || content_[position_] != expected)
+            return false;
+
+        ++position_;
+        return true;
+    }
+
+    bool readField(const size_t length, std::string_view& field)
+    {
+        field = content_.substr(position_, length);
+        if (field.size() != length)
+            return false;
+
+        position_ += length;
+        return true;
+    }
+
+    bool readLengthPrefixedField(std::string_view& field, const char terminator)
+    {
+        size_t length = 0;
+        return readLength(length) && consume(',') && readField(length, field) && consume(terminator);
+    }
+
+    std::string_view content_;
+    size_t position_ = 0;
+};
+} // namespace
+
+MemTable::MemTable(const std::string_view logFilePath)
+    : logPath_(logFilePath), walWriter_(logFilePath), currentSizeBytes_(0)
 {
     if (!restoreFromWAL())
-    {
         throw std::runtime_error("Failed to restore from wal");
-    }
 }
 
 bool MemTable::put(const std::string& key, const std::string& value)
 {
-    try
-    {
-        putToWAL(key, value, Type::VALUE);
-    } catch (const std::system_error& e)
-    {
-        // WAL write failed
-        std::cerr << "putToWAL failed: " << e.code().message() << std::endl;
+    if (!appendToWAL(key, value, Type::VALUE))
         return false;
-    }
-    if (const auto it = table.find(key); it != table.end())
+
+    if (const auto existing = table_.find(key); existing != table_.end())
     {
-        assert(current_size >= it->second.value.size() + it->first.size() + sizeof(Type));
-        current_size -= it->second.value.size();
-        current_size -= it->first.size();
-        current_size -= sizeof(Type);
+        assert(currentSizeBytes_ >= existing->second.value.size() + existing->first.size() + sizeof(Type));
+        currentSizeBytes_ -= existing->second.value.size();
+        currentSizeBytes_ -= existing->first.size();
+        currentSizeBytes_ -= sizeof(Type);
     }
 
-    table[key].value = value;
-    table[key].type = Type::VALUE;
-    current_size += value.size();
-    current_size += key.size();
-    current_size += sizeof(Type);
+    table_[key] = {Type::VALUE, value};
+    currentSizeBytes_ += value.size();
+    currentSizeBytes_ += key.size();
+    currentSizeBytes_ += sizeof(Type);
     return true;
 }
 
-Result MemTable::get(const std::string_view key, std::string &value) const
+Result MemTable::get(const std::string_view key, std::string& value) const
 {
-    const auto it = table.find(key);
-    if (it == table.end())
+    const auto entry = table_.find(key);
+    if (entry == table_.end())
         return Result::ABSENT;
-    if (it->second.type == Type::TOMBSTONE)
+    if (entry->second.type == Type::TOMBSTONE)
         return Result::TOMBSTONE;
-    value = it->second.value;
+
+    value = entry->second.value;
     return Result::VALUE;
 }
 
-bool MemTable::remove(const std::string &key)
+bool MemTable::remove(const std::string& key)
 {
-    try
-    {
-        putToWAL(key, "", Type::TOMBSTONE);
-    } catch (const std::system_error& e)
-    {
-        // WAL write failed
-        std::cerr << "putToWAL failed: " << e.code().message() << std::endl;
+    if (!appendToWAL(key, "", Type::TOMBSTONE))
         return false;
+
+    if (const auto existing = table_.find(key); existing != table_.end())
+    {
+        existing->second.type = Type::TOMBSTONE;
+        currentSizeBytes_ -= existing->second.value.size();
+        existing->second.value.clear();
     }
-    if (const auto it = table.find(key); it != table.end())
+    else
     {
-        it->second.type = Type::TOMBSTONE;
-        current_size -= it->second.value.size();
-        it->second.value.clear();
-    } else
-    {
-        table[key].type = Type::TOMBSTONE;
-        table[key].value = "";
-        current_size += sizeof(Type);
-        current_size += key.size();
+        table_[key] = {Type::TOMBSTONE, ""};
+        currentSizeBytes_ += sizeof(Type);
+        currentSizeBytes_ += key.size();
     }
     return true;
 }
 
-size_t MemTable::size() const
-{
-    return table.size();
-}
+size_t MemTable::size() const { return table_.size(); }
 
-size_t MemTable::size_bytes() const
-{
-    return current_size;
-}
+size_t MemTable::size_bytes() const { return currentSizeBytes_; }
 
-MemTable::WALFileWriter::WALFileWriter(const std::string_view logPath) : path(logPath), poisoned(false)
+MemTable::WALFileWriter::WALFileWriter(const std::string_view logPath) : path_(logPath)
 {
-    if (const auto parentPath = path.parent_path(); !parentPath.empty())
+    if (const auto parentPath = path_.parent_path(); !parentPath.empty())
     {
-        namespace fs = std::filesystem;
-        std::error_code ec;
-        fs::create_directories(parentPath, ec);
-        if (ec)
+        std::error_code error;
+        std::filesystem::create_directories(parentPath, error);
+        if (error)
         {
-            std::cerr << "Create Directory failed: " << ec.message() << std::endl;
+            std::cerr << "Create Directory failed: " << error.message() << std::endl;
             throw std::runtime_error("Failed to create directory");
         }
     }
 
-    fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0664);
-    if (fd < 0)
+    fileDescriptor_ = ::open(path_.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0664);
+    if (fileDescriptor_ < 0)
         throw std::runtime_error("Failed to open file for writing");
 }
 
-void MemTable::WALFileWriter::write(const std::string &record)
+MemTable::WALFileWriter::~WALFileWriter() { ::close(fileDescriptor_); }
+
+void MemTable::WALFileWriter::write(const std::string& record)
 {
-    if (poisoned)
+    if (poisoned_)
         throw std::runtime_error("File is poisoned");
 
-    if (const ssize_t bytesWritten = ::write(fd, record.c_str(), record.size()); bytesWritten < 0 || static_cast<size_t>(bytesWritten) != record.size())
+    const ssize_t bytesWritten = ::write(fileDescriptor_, record.c_str(), record.size());
+    if (bytesWritten < 0 || static_cast<size_t>(bytesWritten) != record.size())
     {
-        poisoned = true;
-        const int err = errno;
-        throw std::system_error(err, std::system_category(), "write failed");
+        poisoned_ = true;
+        const int error = errno;
+        throw std::system_error(error, std::system_category(), "write failed");
     }
 
-    if (::fsync(fd))
+    if (::fsync(fileDescriptor_))
     {
-        poisoned = true;
-        const int err = errno;
-        throw std::system_error(err, std::system_category(), "fsync failed");
+        poisoned_ = true;
+        const int error = errno;
+        throw std::system_error(error, std::system_category(), "fsync failed");
     }
 }
 
 int MemTable::WALFileWriter::truncate(const size_t offset)
 {
-    if (::ftruncate(fd, static_cast<off_t>(offset)) == 0)
+    if (::ftruncate(fileDescriptor_, static_cast<off_t>(offset)) == 0)
         return 0;
-
     return errno;
 }
 
-void MemTable::putToWAL(const std::string& key, const std::string& value, const Type type)
+bool MemTable::appendToWAL(const std::string& key, const std::string& value, const Type type)
 {
-    writer.write(makeWALRecord(key, value, type));
+    try
+    {
+        walWriter_.write(encodeWALRecord(key, value, type));
+        return true;
+    }
+    catch (const std::system_error& error)
+    {
+        std::cerr << "putToWAL failed: " << error.code().message() << std::endl;
+        return false;
+    }
 }
 
 bool MemTable::restoreFromWAL()
 {
-    std::ifstream input(log_path);
+    std::ifstream input(logPath_);
     if (!input)
-    {
         return false;
-    }
 
     std::stringstream contentBuffer;
     contentBuffer << input.rdbuf();
+    const std::string content = contentBuffer.str();
 
-    const std::string content(contentBuffer.str());
     size_t lastGoodOffset = 0;
-    for (const auto walInfo = parseWALRecord(content, lastGoodOffset); const auto &[key, value] : walInfo)
-        table[key] = value;
+    for (const auto& [key, entry] : parseWALRecords(content, lastGoodOffset))
+        table_[key] = entry;
 
     if (lastGoodOffset == content.size())
         return true;
 
-    if (const int err = writer.truncate(lastGoodOffset); err != 0)
+    if (const int error = walWriter_.truncate(lastGoodOffset); error != 0)
     {
-        std::cerr << "truncate error: " << std::generic_category().message(err) << std::endl;
+        std::cerr << "truncate error: " << std::generic_category().message(error) << std::endl;
         return false;
     }
-
     return true;
 }
 
-std::vector<std::pair<std::string, Entry>> MemTable::parseWALRecord(std::string_view content, size_t &lastGoodOffset)
+std::vector<std::pair<std::string, Entry>> MemTable::parseWALRecords(const std::string_view content,
+                                                                     size_t& lastGoodOffset)
 {
-    std::vector<std::pair<std::string, Entry>> records;
-    size_t pos = 0;
-
-    auto readLength = [&content, &pos](size_t &length)
-    {
-        const size_t begin = pos;
-        while (pos < content.size() && std::isdigit(static_cast<unsigned char>(content[pos])))
-            ++pos;
-
-        if (begin == pos || pos == content.size())
-            return false;
-
-        try
-        {
-            length = std::stoull(std::string(content.substr(begin, pos - begin)));
-        } catch (const std::out_of_range&)
-        {
-            return false;
-        }
-        return true;
-    };
-
-    auto consume = [&content, &pos](const char expected)
-    {
-        if (pos >= content.size() || content[pos] != expected)
-            return false;
-
-        ++pos;
-        return true;
-    };
-
-    auto readField = [&content, &pos](const size_t length, std::string_view &field)
-    {
-        field = content.substr(pos, length);
-        if (field.size() != length)
-            return false;
-
-        pos += length;
-        return true;
-    };
-
-    while (pos < content.size())
-    {
-        lastGoodOffset = pos;
-
-        std::string_view type;
-        if (!readField(1, type) || !consume(','))
-            return records;
-
-        if (type != "D" && type != "P")
-            return records;
-
-        Type cur_type = type == "P" ? Type::VALUE : Type::TOMBSTONE;
-
-        std::string_view key;
-        if (size_t keyLen = 0; !readLength(keyLen) || !consume(',') || !readField(keyLen, key) || !consume('='))
-            return records;
-
-        std::string_view value;
-        if (size_t valueLen = 0; !readLength(valueLen) || !consume(',') || !readField(valueLen, value) || !consume('\n'))
-            return records;
-
-        auto record = std::make_pair<std::string, Entry>(std::string(key), {cur_type, std::string(value)});
-
-        records.emplace_back(record);
-    }
-    lastGoodOffset = pos;
-    return records;
+    return WALParser(content).parse(lastGoodOffset);
 }
 
-MemTableIterator::MemTableIterator(const MemTable& mt) : currentIt(mt.begin()), endIt(mt.end())
+MemTableIterator::MemTableIterator(const MemTable& memTable)
+    : currentIterator_(memTable.begin()), endIterator_(memTable.end())
 {
-    if (currentIt != endIt)
-    {
-        Record record;
-        record.key = currentIt->first;
-        record.value = currentIt->second.value;
-        record.type = currentIt->second.type;
-        currentRecord = std::move(record);
-    }
+    refreshCurrentRecord();
 }
 
-bool MemTableIterator::valid() const
-{
-    return currentRecord.has_value();
-}
+bool MemTableIterator::valid() const { return currentRecord_.has_value(); }
 
 const Record& MemTableIterator::current() const
 {
     assert(valid());
-    return *currentRecord;
+    return *currentRecord_;
 }
 
 void MemTableIterator::advance()
 {
-    ++currentIt;
-    if (currentIt != endIt)
+    ++currentIterator_;
+    refreshCurrentRecord();
+}
+
+void MemTableIterator::refreshCurrentRecord()
+{
+    if (currentIterator_ == endIterator_)
     {
-        Record record;
-        record.key = currentIt->first;
-        record.value = currentIt->second.value;
-        record.type = currentIt->second.type;
-        currentRecord = std::move(record);
+        currentRecord_.reset();
+        return;
     }
-    else
-        currentRecord.reset();
+
+    currentRecord_ = Record{
+        currentIterator_->first,
+        currentIterator_->second.type,
+        currentIterator_->second.value,
+    };
 }

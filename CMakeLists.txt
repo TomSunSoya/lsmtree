@@ -1,50 +1,35 @@
 cmake_minimum_required(VERSION 4.2)
-project(lsmtree)
+project(lsmtree LANGUAGES CXX)
 
-set(CMAKE_CXX_STANDARD 23)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
+include(cmake/Format.cmake)
 
 # Engine code lives in a library; tests (and a future CLI) link against it.
 add_library(lsmtree_lib
+        src/BloomFilter.cpp
+        src/DB.cpp
+        src/Manifest.cpp
         src/MemTable.cpp
         src/SSTable.cpp
-        src/utils.cpp
-        src/Manifest.cpp
-        inc/SSTable.h
-        inc/Manifest.h
-        src/DB.cpp
-        inc/DB.h
-        src/BloomFilter.cpp
-        inc/BloomFilter.h)
+        src/utils.cpp)
 target_include_directories(lsmtree_lib PUBLIC inc)
+target_compile_features(lsmtree_lib PUBLIC cxx_std_23)
 
 enable_testing()
 
 find_package(GTest CONFIG REQUIRED)
 
-add_executable(memtable_tests tests/memtable_tests.cpp)
-target_link_libraries(memtable_tests PRIVATE lsmtree_lib GTest::gtest_main)
-
-add_executable(sstable_tests tests/sstable_tests.cpp)
-target_link_libraries(sstable_tests PRIVATE lsmtree_lib GTest::gtest_main)
-
-add_executable(manifest_tests tests/manifest_tests.cpp)
-target_link_libraries(manifest_tests PRIVATE lsmtree_lib GTest::gtest_main)
-
-add_executable(db_tests tests/db_tests.cpp)
-target_link_libraries(db_tests PRIVATE lsmtree_lib GTest::gtest_main)
-
-add_executable(bloom_filter_tests tests/bloom_filter_tests.cpp)
-target_link_libraries(bloom_filter_tests PRIVATE lsmtree_lib GTest::gtest_main)
-
-add_executable(utils_tests tests/utils_tests.cpp)
-target_link_libraries(utils_tests PRIVATE lsmtree_lib GTest::gtest_main)
-
 include(GoogleTest)
 set(LSMTREE_GTEST_DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(memtable_tests DISCOVERY_TIMEOUT ${LSMTREE_GTEST_DISCOVERY_TIMEOUT})
-gtest_discover_tests(sstable_tests DISCOVERY_TIMEOUT ${LSMTREE_GTEST_DISCOVERY_TIMEOUT})
-gtest_discover_tests(manifest_tests DISCOVERY_TIMEOUT ${LSMTREE_GTEST_DISCOVERY_TIMEOUT})
-gtest_discover_tests(db_tests DISCOVERY_TIMEOUT ${LSMTREE_GTEST_DISCOVERY_TIMEOUT})
-gtest_discover_tests(bloom_filter_tests DISCOVERY_TIMEOUT ${LSMTREE_GTEST_DISCOVERY_TIMEOUT})
-gtest_discover_tests(utils_tests DISCOVERY_TIMEOUT ${LSMTREE_GTEST_DISCOVERY_TIMEOUT})
+
+function(add_lsmtree_test target source)
+    add_executable(${target} ${source})
+    target_link_libraries(${target} PRIVATE lsmtree_lib GTest::gtest_main)
+    gtest_discover_tests(${target} DISCOVERY_TIMEOUT ${LSMTREE_GTEST_DISCOVERY_TIMEOUT})
+endfunction()
+
+add_lsmtree_test(memtable_tests tests/memtable_tests.cpp)
+add_lsmtree_test(sstable_tests tests/sstable_tests.cpp)
+add_lsmtree_test(manifest_tests tests/manifest_tests.cpp)
+add_lsmtree_test(db_tests tests/db_tests.cpp)
+add_lsmtree_test(bloom_filter_tests tests/bloom_filter_tests.cpp)
+add_lsmtree_test(utils_tests tests/utils_tests.cpp)

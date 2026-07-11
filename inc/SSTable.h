@@ -1,49 +1,58 @@
 #pragma once
 
-#include "BloomFilter.h"
-#include "MemTable.h"
+#include <cstddef>
+#include <cstdint>
+#include <filesystem>
+#include <fstream>
+#include <memory>
+#include <optional>
+#include <span>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
 
-class SSTableIterator;
+#include "BloomFilter.h"
+#include "utils.h"
+
+class MemTable;
 
 class SSTable
 {
-public:
-    static std::pair<std::string, std::string> build(const MemTable &mt, const std::filesystem::path& path);
-    static void cleanupOrphanedTemps(const std::filesystem::path& dir);
+  public:
+    static std::pair<std::string, std::string> build(const MemTable& memTable, const std::filesystem::path& path);
+    static void cleanupOrphanedTemps(const std::filesystem::path& directory);
+    static void addRecordToFile(std::span<Record> records, const std::filesystem::path& path);
 
     explicit SSTable(std::filesystem::path path);
 
-    Result get(std::string_view key, std::string &value) const;
+    Result get(std::string_view key, std::string& value) const;
 
-    static void addRecordToFile(std::span<Record> records, const std::filesystem::path& path);
+  private:
+    static constexpr size_t kBlockSize = 4 * 1024;
 
-private:
-    std::filesystem::path path;
-    uint64_t recordsSize{}, bloomSize{}, indexSize{};
-    std::unique_ptr<BloomFilter> bloomFilter{};
-
-    static constexpr size_t BLOCK_SIZE = 4 * 1024;
-
+    [[nodiscard]] std::vector<Index> readSparseIndex() const;
     [[nodiscard]] std::optional<std::pair<Index, uint64_t>> getBlock(std::string_view key) const;
 
-    friend class SSTableIterator;
-
-    static std::optional<Record> readOneRecord(std::ifstream &ifs);
-    static std::optional<Index> readOneIndex(std::ifstream &ifs);
+    std::filesystem::path path_;
+    uint64_t recordsSize_{};
+    uint64_t bloomSize_{};
+    uint64_t indexSize_{};
+    std::unique_ptr<BloomFilter> bloomFilter_{};
 };
 
 class SSTableIterator : public Iterator
 {
-public:
+  public:
     explicit SSTableIterator(std::filesystem::path path);
 
-    bool valid() const override;
-    const Record &current() const override;
+    [[nodiscard]] bool valid() const override;
+    [[nodiscard]] const Record& current() const override;
     void advance() override;
 
-private:
-    std::filesystem::path path;
-    std::optional<Record> currentRecord{};
-    std::ifstream ifs;
-    uint64_t recordsSize{}, bloomSize{}, currentPos{}, indexSize{};
+  private:
+    std::optional<Record> currentRecord_{};
+    std::ifstream input_;
+    uint64_t recordsSize_{};
+    uint64_t currentPosition_{};
 };
