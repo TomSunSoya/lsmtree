@@ -1,4 +1,4 @@
-#pragma once
+module;
 
 #include <cstddef>
 #include <cstdint>
@@ -11,7 +11,9 @@
 
 #include "utils.h"
 
-class Manifest
+export module lsm.manifest;
+
+export class Manifest
 {
   public:
     explicit Manifest(std::filesystem::path path);

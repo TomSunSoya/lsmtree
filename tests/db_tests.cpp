@@ -7,11 +7,12 @@
 
 #include <gtest/gtest.h>
 
-#include "Manifest.h"
 #include "MemTable.h"
 #include "test_support.h"
+#include "utils.h"
 
 import lsm.db;
+import lsm.manifest;
 import lsm.sstable;
 
 namespace

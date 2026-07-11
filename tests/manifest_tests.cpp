@@ -8,8 +8,10 @@
 
 #include <gtest/gtest.h>
 
-#include "Manifest.h"
 #include "test_support.h"
+#include "utils.h"
+
+import lsm.manifest;
 
 namespace
 {
