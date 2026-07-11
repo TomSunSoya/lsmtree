@@ -1185,3 +1185,34 @@ TEST(DBTest, ScanKeepsKeysFromEveryOverlappingLevelOneTable)
 
     std::filesystem::remove_all(root);
 }
+
+TEST(DBTest, ScanIncludesStartAtTableMaxAndPrunesEndAtNextTableMin)
+{
+    const std::filesystem::path root("db_tests_scan_l1_touching_boundaries");
+    std::filesystem::remove_all(root);
+
+    {
+        const DB db(root, kManualFlushThreshold);
+    }
+
+    uint64_t excludedTableNumber = 0;
+    {
+        Manifest manifest(root / "MANIFEST");
+        ASSERT_NO_FATAL_FAILURE(addLevelOneTable(root, manifest, {{"alpha", "one"}, {"bravo", "two"}}));
+        ASSERT_NO_FATAL_FAILURE(addLevelOneTable(root, manifest, {{"delta", "four"}, {"foxtrot", "six"}}));
+        ASSERT_EQ(2, manifest.level(1).size());
+        excludedTableNumber = manifest.level(1)[1].number;
+        ASSERT_NO_THROW(manifest.save());
+    }
+
+    const auto excludedTablePath = root / "sstable" / ("sst_" + std::to_string(excludedTableNumber) + ".sst");
+    // Make an unwanted source load observable instead of relying only on the final half-open range filter.
+    ASSERT_TRUE(std::filesystem::remove(excludedTablePath));
+
+    {
+        const DB db(root, kManualFlushThreshold);
+        ASSERT_NO_FATAL_FAILURE(expectScanValues(db, "bravo", "delta", {{"bravo", "two"}}));
+    }
+
+    std::filesystem::remove_all(root);
+}

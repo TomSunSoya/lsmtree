@@ -10,6 +10,7 @@
 #include <string_view>
 #include <system_error>
 #include <ranges>
+#include <unordered_set>
 
 #include "SSTable.h"
 
@@ -172,8 +173,16 @@ std::vector<Record> DB::scan(std::string_view start, std::string_view end) const
 
     namespace fs = std::filesystem;
     std::vector<fs::path> inputFiles;
-    for (const auto index : manifest->allTableNumbers())
-        inputFiles.emplace_back(sstablePath(data_dir, index));
+
+    for (uint64_t i = 0; i < manifest->levelCount(); ++i)
+    {
+        for (const auto &[number, minKey, maxKey] : manifest->level(i))
+        {
+            if (maxKey < start || end <= minKey)
+                continue;
+            inputFiles.emplace_back(sstablePath(data_dir, number));
+        }
+    }
 
     std::ranges::transform(inputFiles, std::back_inserter(iters), [](const fs::path &p)
     {
