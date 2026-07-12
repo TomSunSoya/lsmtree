@@ -4,3 +4,5 @@ cmake-build-*/
 .omx/
 cmake-build-asan/
 cmake-build-modules/
+.omo/
+.vscode/

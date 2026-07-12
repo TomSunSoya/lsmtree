@@ -18,6 +18,8 @@ namespace
 using test_support::ScopedPathCleanup;
 using test_support::writeFile;
 
+constexpr uint64_t kTestTableSize = 64;
+
 void expectTables(const Manifest& manifest, std::set<uint64_t, std::greater<>> expected)
 {
     EXPECT_EQ(expected, manifest.allTableNumbers());
@@ -44,7 +46,7 @@ TEST(ManifestTest, MissingManifestStartsWithEmptyTableSet)
     EXPECT_EQ(0, manifest.nextNumber());
 }
 
-TEST(ManifestTest, SaveAndReloadPreservesTablesAndNextNumber)
+TEST(ManifestTest, SaveAndReloadPreservesTablesSizesAndNextNumber)
 {
     const std::filesystem::path root("manifest_tests_save_reload");
     const ScopedPathCleanup cleanup(root);
@@ -58,16 +60,18 @@ TEST(ManifestTest, SaveAndReloadPreservesTablesAndNextNumber)
         EXPECT_EQ(0, first);
         EXPECT_EQ(1, second);
 
-        manifest.addTable(first, "apple", "mango", 0);
-        manifest.addTable(second, "nectarine", "zucchini", 0);
+        manifest.addTable(first, 101, "apple", "mango", 0);
+        manifest.addTable(second, 202, "nectarine", "zucchini", 0);
         ASSERT_NO_THROW(manifest.save());
     }
 
     Manifest reloaded(manifestPath);
     expectTables(reloaded, {1, 0});
     ASSERT_EQ(2, reloaded.level(0).size());
+    EXPECT_EQ(202, reloaded.level(0)[0].size);
     EXPECT_EQ("nectarine", reloaded.level(0)[0].minKey);
     EXPECT_EQ("zucchini", reloaded.level(0)[0].maxKey);
+    EXPECT_EQ(101, reloaded.level(0)[1].size);
     EXPECT_EQ("apple", reloaded.level(0)[1].minKey);
     EXPECT_EQ("mango", reloaded.level(0)[1].maxKey);
     EXPECT_EQ(2, reloaded.nextNumber());
@@ -87,8 +91,8 @@ TEST(ManifestTest, SaveAndReloadPreservesArbitraryKeyBytes)
 
     {
         Manifest manifest(manifestPath);
-        manifest.addTable(9, newlineMin, colonMax, 0);
-        manifest.addTable(8, nulMin, mixedMax, 0);
+        manifest.addTable(9, kTestTableSize, newlineMin, colonMax, 0);
+        manifest.addTable(8, kTestTableSize, nulMin, mixedMax, 0);
         ASSERT_NO_THROW(manifest.save());
     }
 
@@ -110,9 +114,9 @@ TEST(ManifestTest, AddTableKeepsLevelZeroSortedByNewestTableNumber)
     ASSERT_TRUE(std::filesystem::create_directories(root));
 
     Manifest manifest(root / "MANIFEST");
-    manifest.addTable(3, "same-min", "same-max", 0);
-    manifest.addTable(7, "same-min", "same-max", 0);
-    manifest.addTable(5, "same-min", "same-max", 0);
+    manifest.addTable(3, kTestTableSize, "same-min", "same-max", 0);
+    manifest.addTable(7, kTestTableSize, "same-min", "same-max", 0);
+    manifest.addTable(5, kTestTableSize, "same-min", "same-max", 0);
 
     const auto& level0 = manifest.level(0);
     ASSERT_EQ(3, level0.size());
@@ -128,9 +132,9 @@ TEST(ManifestTest, AddTableKeepsHigherLevelSortedByMinKey)
     ASSERT_TRUE(std::filesystem::create_directories(root));
 
     Manifest manifest(root / "MANIFEST");
-    manifest.addTable(11, "m", "z", 1);
-    manifest.addTable(10, "a", "c", 1);
-    manifest.addTable(12, "d", "f", 1);
+    manifest.addTable(11, kTestTableSize, "m", "z", 1);
+    manifest.addTable(10, kTestTableSize, "a", "c", 1);
+    manifest.addTable(12, kTestTableSize, "d", "f", 1);
 
     EXPECT_TRUE(manifest.level(0).empty());
     const auto& level1 = manifest.level(1);
@@ -153,12 +157,12 @@ TEST(ManifestTest, AddTableRejectsOverlappingHigherLevelRanges)
     ASSERT_TRUE(std::filesystem::create_directories(root));
 
     Manifest manifest(root / "MANIFEST");
-    manifest.addTable(1, "d", "f", 1);
-    manifest.addTable(2, "a", "c", 1);
-    manifest.addTable(3, "g", "z", 1);
+    manifest.addTable(1, kTestTableSize, "d", "f", 1);
+    manifest.addTable(2, kTestTableSize, "a", "c", 1);
+    manifest.addTable(3, kTestTableSize, "g", "z", 1);
 
-    EXPECT_THROW(manifest.addTable(4, "c", "e", 1), std::invalid_argument);
-    EXPECT_THROW(manifest.addTable(5, "e", "h", 1), std::invalid_argument);
+    EXPECT_THROW(manifest.addTable(4, kTestTableSize, "c", "e", 1), std::invalid_argument);
+    EXPECT_THROW(manifest.addTable(5, kTestTableSize, "e", "h", 1), std::invalid_argument);
     ASSERT_EQ(3, manifest.level(1).size());
 }
 
@@ -169,8 +173,8 @@ TEST(ManifestTest, GetTableMetaReturnsEmptyWhenKeyIsBeforeFirstTable)
     ASSERT_TRUE(std::filesystem::create_directories(root));
 
     Manifest manifest(root / "MANIFEST");
-    manifest.addTable(10, "b", "d", 1);
-    manifest.addTable(11, "g", "k", 1);
+    manifest.addTable(10, kTestTableSize, "b", "d", 1);
+    manifest.addTable(11, kTestTableSize, "g", "k", 1);
 
     EXPECT_FALSE(manifest.getTableMeta(1, "a").has_value());
 }
@@ -182,8 +186,8 @@ TEST(ManifestTest, GetTableMetaReturnsEmptyWhenKeyFallsBetweenTables)
     ASSERT_TRUE(std::filesystem::create_directories(root));
 
     Manifest manifest(root / "MANIFEST");
-    manifest.addTable(10, "b", "d", 1);
-    manifest.addTable(11, "g", "k", 1);
+    manifest.addTable(10, kTestTableSize, "b", "d", 1);
+    manifest.addTable(11, kTestTableSize, "g", "k", 1);
 
     EXPECT_FALSE(manifest.getTableMeta(1, "e").has_value());
 }
@@ -195,8 +199,8 @@ TEST(ManifestTest, GetTableMetaTreatsMinAndMaxKeysAsInclusiveBounds)
     ASSERT_TRUE(std::filesystem::create_directories(root));
 
     Manifest manifest(root / "MANIFEST");
-    manifest.addTable(10, "b", "d", 1);
-    manifest.addTable(11, "g", "k", 1);
+    manifest.addTable(10, kTestTableSize, "b", "d", 1);
+    manifest.addTable(11, kTestTableSize, "g", "k", 1);
 
     const auto firstMin = manifest.getTableMeta(1, "b");
     ASSERT_TRUE(firstMin.has_value());
@@ -227,7 +231,7 @@ TEST(ManifestTest, StaleTemporaryFileDoesNotOverrideSavedManifest)
         Manifest manifest(manifestPath);
         for (uint64_t i = 0; i < 8; ++i)
             EXPECT_EQ(i, manifest.allocateNumber());
-        manifest.addTable(7, "first", "last", 0);
+        manifest.addTable(7, kTestTableSize, "first", "last", 0);
         ASSERT_NO_THROW(manifest.save());
     }
     ASSERT_NO_FATAL_FAILURE(writeFile(tempPath, "stale temporary manifest"));
@@ -249,7 +253,7 @@ TEST(ManifestTest, SavePublishesThroughTemporaryFileAndRemovesStaleTemp)
 
     {
         Manifest manifest(manifestPath);
-        manifest.addTable(4, "first", "last", 0);
+        manifest.addTable(4, kTestTableSize, "first", "last", 0);
         ASSERT_NO_THROW(manifest.save());
     }
 
@@ -267,11 +271,11 @@ TEST(ManifestTest, ReplaceTablesPersistsCompactionResult)
 
     {
         Manifest manifest(manifestPath);
-        manifest.addTable(5, "a", "c", 0);
-        manifest.addTable(3, "d", "f", 0);
-        manifest.addTable(1, "x", "z", 1);
+        manifest.addTable(5, 500, "a", "c", 0);
+        manifest.addTable(3, 300, "d", "f", 0);
+        manifest.addTable(1, 100, "x", "z", 1);
 
-        manifest.replaceTables({5, 3}, {{7, "a", "c"}, {8, "d", "f"}}, 1);
+        manifest.replaceTables({5, 3}, {{7, 700, "a", "c"}, {8, 800, "d", "f"}}, 1);
         expectTables(manifest, {8, 7, 1});
         ASSERT_NO_THROW(manifest.save());
     }
@@ -282,12 +286,15 @@ TEST(ManifestTest, ReplaceTablesPersistsCompactionResult)
     const auto& level1 = reloaded.level(1);
     ASSERT_EQ(3, level1.size());
     EXPECT_EQ(7, level1[0].number);
+    EXPECT_EQ(700, level1[0].size);
     EXPECT_EQ("a", level1[0].minKey);
     EXPECT_EQ("c", level1[0].maxKey);
     EXPECT_EQ(8, level1[1].number);
+    EXPECT_EQ(800, level1[1].size);
     EXPECT_EQ("d", level1[1].minKey);
     EXPECT_EQ("f", level1[1].maxKey);
     EXPECT_EQ(1, level1[2].number);
+    EXPECT_EQ(100, level1[2].size);
     EXPECT_EQ("x", level1[2].minKey);
     EXPECT_EQ("z", level1[2].maxKey);
 }

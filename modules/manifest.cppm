@@ -1,3 +1,4 @@
+module;
 export module lsm.manifest;
 
 import lsm.utils;
@@ -12,7 +13,8 @@ export class Manifest
     [[nodiscard]] uint64_t nextNumber() const;
     uint64_t allocateNumber();
 
-    void addTable(uint64_t number, std::string_view minKey, std::string_view maxKey, uint32_t targetLevel);
+    void addTable(uint64_t number, uint64_t size, std::string_view minKey, std::string_view maxKey,
+                  uint32_t targetLevel);
     void replaceTables(const std::vector<uint64_t>& removed, const std::vector<TableMeta>& added, uint32_t targetLevel);
     void save() const;
 
@@ -29,6 +31,7 @@ export class Manifest
     std::filesystem::path path_{};
     std::vector<std::vector<TableMeta>> levels_;
     uint64_t nextTableNumber_{};
-    uint8_t formatVersion_{};
     uint64_t logNumber_{};
+
+    static constexpr uint8_t kManifestFormatVersion = 2;
 };

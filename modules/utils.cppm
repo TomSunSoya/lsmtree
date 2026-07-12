@@ -1,3 +1,5 @@
+module;
+#include <cstdint>
 export module lsm.utils;
 
 import std;
@@ -30,6 +32,7 @@ export struct Index
 export struct TableMeta
 {
     uint64_t number;
+    uint64_t size;
     std::string minKey;
     std::string maxKey;
 };

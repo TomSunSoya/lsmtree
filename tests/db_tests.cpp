@@ -95,7 +95,8 @@ void addLevelOneTable(const std::filesystem::path& root, Manifest& manifest,
         ASSERT_NO_THROW(keyRange = SSTable::build(table, tablePath));
     }
 
-    ASSERT_NO_THROW(manifest.addTable(tableNumber, keyRange.first, keyRange.second, 1));
+    ASSERT_NO_THROW(
+        manifest.addTable(tableNumber, std::filesystem::file_size(tablePath), keyRange.first, keyRange.second, 1));
     std::filesystem::remove(walPath);
 }
 
@@ -400,10 +401,11 @@ TEST(DBTest, EmptyFlushDoesNotAllocateSSTableOrRotateWal)
     EXPECT_EQ(0, manifest.nextNumber());
 }
 
-TEST(DBTest, FlushPersistsSSTableKeyRangeInManifest)
+TEST(DBTest, FlushPersistsSSTableMetadataInManifest)
 {
     const std::filesystem::path root("db_tests_flush_persists_key_range");
     const ScopedPathCleanup cleanup(root);
+    const std::filesystem::path tablePath = root / "sstable" / "sst_0.sst";
 
     {
         DB db(root, kManualFlushThreshold);
@@ -418,6 +420,7 @@ TEST(DBTest, FlushPersistsSSTableKeyRangeInManifest)
     const auto& level = manifest.level(0);
     ASSERT_EQ(1, level.size());
     EXPECT_EQ(0, level[0].number);
+    EXPECT_EQ(std::filesystem::file_size(tablePath), level[0].size);
     EXPECT_EQ("alpha", level[0].minKey);
     EXPECT_EQ("zulu", level[0].maxKey);
 }
@@ -724,7 +727,7 @@ TEST(DBTest, CompactPersistsMergedTableAcrossReopen)
     }
 }
 
-TEST(DBTest, CompactPersistsMergedKeyRangeInManifest)
+TEST(DBTest, CompactPersistsMergedTableMetadataInManifest)
 {
     const std::filesystem::path root("db_tests_compact_persists_key_range");
     const ScopedPathCleanup cleanup(root);
@@ -746,6 +749,7 @@ TEST(DBTest, CompactPersistsMergedKeyRangeInManifest)
     const auto& level = manifest.level(1);
     ASSERT_EQ(1, level.size());
     EXPECT_EQ(4, level[0].number);
+    EXPECT_EQ(std::filesystem::file_size(root / "sstable" / "sst_4.sst"), level[0].size);
     EXPECT_EQ("alpha", level[0].minKey);
     EXPECT_EQ("zulu", level[0].maxKey);
 }

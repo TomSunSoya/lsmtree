@@ -1,8 +1,8 @@
 {
     "clangd.path": "/opt/homebrew/opt/llvm/bin/clangd",
-    "clangd.arguments": [
-        "--experimental-modules-support",
-        "--compile-commands-dir=cmake-build-std"
-    ],
-    "C_Cpp.intelliSenseEngine": "disabled"
+    "editor.semanticTokenColorCustomizations": {
+        "rules": {
+            "keyword": "#569CD6"
+        }
+    }
 }
