@@ -6,3 +6,4 @@ cmake-build-asan/
 cmake-build-modules/
 .omo/
 .vscode/
+.worktrees/
