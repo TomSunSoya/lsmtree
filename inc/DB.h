@@ -4,10 +4,12 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 #include "Manifest.h"
 #include "MemTable.h"
+#include "SSTable.h"
 
 class DB
 {
@@ -34,4 +36,5 @@ class DB
     std::unique_ptr<Manifest> manifest_;
     uint64_t level0CompactionThreshold_;
     uint64_t compactionSliceBytes_;
+    mutable std::unordered_map<uint64_t, std::unique_ptr<SSTable>> tables_{};
 };

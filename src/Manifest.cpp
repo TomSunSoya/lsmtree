@@ -110,7 +110,7 @@ void Manifest::addTable(const uint64_t number, const std::string_view minKey, co
         const auto position =
             std::lower_bound(level.begin(), level.end(), number,
                              [](const TableMeta& candidate, const uint64_t value) { return candidate.number > value; });
-        level.insert(position, std::move(table));
+        level.insert(position, table);
         return;
     }
 

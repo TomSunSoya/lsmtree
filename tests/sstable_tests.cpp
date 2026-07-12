@@ -538,6 +538,46 @@ TEST(SSTableTest, SparseIndexLocatesKeysAcrossMultipleBlocks)
     expectMissing(sstable, falsePositiveBeforeFirst);
 }
 
+TEST(SSTableTest, ConstructorCachesSparseIndexForSubsequentReads)
+{
+    const std::filesystem::path root("sstable_tests_cached_sparse_index");
+    const ScopedPathCleanup cleanup(root);
+    const std::filesystem::path walPath = root / "source.wal";
+    const std::filesystem::path sstablePath = root / "table.sst";
+    constexpr size_t entryCount = 12;
+    constexpr size_t valueSize = 1'500;
+    std::filesystem::create_directories(root);
+
+    {
+        MemTable memTable(walPath.string());
+        for (size_t i = 0; i < entryCount; ++i)
+            ASSERT_NO_FATAL_FAILURE(expectPut(memTable, multiBlockKey(i), std::string(valueSize, 'a' + i)));
+
+        ASSERT_NO_THROW(SSTable::build(memTable, sstablePath));
+    }
+
+    const SSTable sstable(sstablePath);
+
+    uint64_t recordsSize = 0;
+    uint64_t bloomSize = 0;
+    uint64_t indexSize = 0;
+    {
+        std::ifstream input(sstablePath, std::ios::binary);
+        ASSERT_TRUE(input.is_open());
+        input.seekg(-24, std::ios::end);
+        ASSERT_TRUE(input.read(reinterpret_cast<char*>(&recordsSize), sizeof(recordsSize)));
+        ASSERT_TRUE(input.read(reinterpret_cast<char*>(&bloomSize), sizeof(bloomSize)));
+        ASSERT_TRUE(input.read(reinterpret_cast<char*>(&indexSize), sizeof(indexSize)));
+    }
+    ASSERT_GT(indexSize, 0);
+
+    // Removing the on-disk index after construction is a deterministic probe: the records and Bloom filter remain
+    // readable, so a lookup in a later block succeeds only when the sparse index was retained in memory.
+    ASSERT_NO_THROW(std::filesystem::resize_file(sstablePath, recordsSize + bloomSize));
+    ASSERT_EQ(recordsSize + bloomSize, std::filesystem::file_size(sstablePath));
+    ASSERT_NO_FATAL_FAILURE(expectGet(sstable, multiBlockKey(9), std::string(valueSize, 'a' + 9)));
+}
+
 TEST(SSTableTest, SparseIndexPreservesTombstoneInLaterBlock)
 {
     const std::filesystem::path root("sstable_tests_sparse_index_tombstone");

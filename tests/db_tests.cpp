@@ -1,4 +1,6 @@
+#include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <limits>
 #include <string>
 #include <string_view>
@@ -108,6 +110,16 @@ void expectSSTableValues(const std::filesystem::path& path,
     }
     if (cursor.valid())
         ADD_FAILURE() << "unexpected record in " << path << ": key='" << cursor.current().key << "'";
+}
+
+void overwriteSSTableIndexSize(const std::filesystem::path& path, const uint64_t indexSize)
+{
+    std::fstream file(path, std::ios::binary | std::ios::in | std::ios::out);
+    ASSERT_TRUE(file.is_open());
+
+    file.seekp(-static_cast<std::streamoff>(sizeof(indexSize)), std::ios::end);
+    ASSERT_TRUE(file.write(reinterpret_cast<const char*>(&indexSize), sizeof(indexSize)));
+    ASSERT_TRUE(file.good());
 }
 } // namespace
 
@@ -423,6 +435,25 @@ TEST(DBTest, GetFallsBackToFlushedSSTable)
         ASSERT_NO_FATAL_FAILURE(expectGet(db, "beta", "two"));
         expectMissing(db, "gamma");
     }
+}
+
+TEST(DBTest, ReusesCachedSSTableAcrossPointReads)
+{
+    const std::filesystem::path root("db_tests_reuses_cached_sstable");
+    const ScopedPathCleanup cleanup(root);
+    const std::filesystem::path tablePath = root / "sstable" / "sst_0.sst";
+
+    DB db(root, kManualFlushThreshold);
+    ASSERT_NO_FATAL_FAILURE(expectPut(db, "alpha", "one"));
+    ASSERT_NO_FATAL_FAILURE(expectPut(db, "beta", "two"));
+    ASSERT_NO_THROW(db.flush());
+
+    ASSERT_NO_FATAL_FAILURE(expectGet(db, "alpha", "one"));
+
+    // Make constructing a replacement SSTable unable to discover a block. A cached object keeps the metadata
+    // loaded by the first point read and can still locate a different key in the immutable records region.
+    ASSERT_NO_FATAL_FAILURE(overwriteSSTableIndexSize(tablePath, 0));
+    ASSERT_NO_FATAL_FAILURE(expectGet(db, "beta", "two"));
 }
 
 TEST(DBTest, ActiveMemTableOverridesFlushedSSTable)
