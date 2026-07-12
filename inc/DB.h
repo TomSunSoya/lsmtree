@@ -28,6 +28,8 @@ class DB
   private:
     bool searchSSTables(std::string_view key, std::string& value) const;
     Result searchTable(uint64_t tableNumber, std::string_view key, std::string& value) const;
+    void compactLevel0();
+    void maybeCompact();
 
     std::unique_ptr<MemTable> activeMemTable_;
     std::filesystem::path dataDirectory_;

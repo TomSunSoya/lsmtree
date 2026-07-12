@@ -376,6 +376,24 @@ TEST(SSTableTest, AddRecordToFileWritesOnlyRequestedSpan)
     EXPECT_FALSE(cursor.valid());
 }
 
+TEST(SSTableTest, AddRecordToFileReturnsPublishedFileSize)
+{
+    const std::filesystem::path root("sstable_tests_add_record_size");
+    const ScopedPathCleanup cleanup(root);
+    ASSERT_TRUE(std::filesystem::create_directories(root));
+    const std::filesystem::path sstablePath = root / "sst_0.sst";
+    std::vector<Record> records{
+        {"alpha", Type::VALUE, "one"},
+        {"beta", Type::TOMBSTONE, ""},
+    };
+
+    uint64_t reportedSize = 0;
+    ASSERT_NO_THROW(reportedSize = SSTable::addRecordToFile(records, sstablePath));
+
+    ASSERT_TRUE(std::filesystem::is_regular_file(sstablePath));
+    EXPECT_EQ(std::filesystem::file_size(sstablePath), reportedSize);
+}
+
 TEST(SSTableTest, AddRecordToFileRejectsEmptySpan)
 {
     const std::filesystem::path root("sstable_tests_add_record_empty");

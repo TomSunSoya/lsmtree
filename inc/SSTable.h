@@ -22,7 +22,7 @@ class SSTable
   public:
     static std::pair<std::string, std::string> build(const MemTable& memTable, const std::filesystem::path& path);
     static void cleanupOrphanedTemps(const std::filesystem::path& directory);
-    static void addRecordToFile(std::span<Record> records, const std::filesystem::path& path);
+    static uint64_t addRecordToFile(std::span<Record> records, const std::filesystem::path& path);
 
     explicit SSTable(std::filesystem::path path);
 

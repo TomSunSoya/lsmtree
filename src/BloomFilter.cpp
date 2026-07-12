@@ -52,7 +52,7 @@ BloomFilter BloomFilter::fromBytes(const std::span<const std::byte> data)
     return bloomFilter;
 }
 
-BloomFilter::BloomFilter(const unsigned int expectedEntries, const double falsePositiveProbability)
+BloomFilter::BloomFilter(unsigned int expectedEntries, double falsePositiveProbability)
 {
     static const double naturalLogOfTwo = std::log(2.0);
     const double calculatedBitCount = -static_cast<double>(expectedEntries) * std::log(falsePositiveProbability) /
@@ -63,12 +63,12 @@ BloomFilter::BloomFilter(const unsigned int expectedEntries, const double falseP
     words_.resize(wordCountFor(bitCount_));
 }
 
-BloomFilter::BloomFilter(const uint64_t bitCount, const uint64_t hashCount) : bitCount_(bitCount), hashCount_(hashCount)
+BloomFilter::BloomFilter(uint64_t bitCount, uint64_t hashCount) : bitCount_(bitCount), hashCount_(hashCount)
 {
     words_.resize(wordCountFor(bitCount_));
 }
 
-void BloomFilter::add(const std::string_view key)
+void BloomFilter::add(std::string_view key)
 {
     for (uint64_t hashIndex = 0; hashIndex < hashCount_; ++hashIndex)
     {
@@ -89,7 +89,7 @@ bool BloomFilter::mightContain(const std::string_view key) const
     return true;
 }
 
-uint64_t BloomFilter::getBitPosition(const std::string_view key, const uint64_t hashIndex) const
+uint64_t BloomFilter::getBitPosition(std::string_view key, uint64_t hashIndex) const
 {
     const size_t hash = std::hash<std::string_view>{}(key);
     const uint32_t firstHash = hash >> 32;

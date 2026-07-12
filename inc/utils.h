@@ -44,6 +44,7 @@ struct Index
 struct TableMeta
 {
     uint64_t number;
+    uint64_t size;
     std::string minKey;
     std::string maxKey;
 };

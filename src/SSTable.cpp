@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cassert>
+#include <cstdint>
 #include <cstring>
 #include <iterator>
 #include <stdexcept>
@@ -229,10 +230,12 @@ std::optional<std::pair<Index, uint64_t>> SSTable::getBlock(const std::string_vi
     return std::make_pair(*std::prev(position), blockEnd);
 }
 
-void SSTable::addRecordToFile(const std::span<Record> records, const std::filesystem::path& path)
+uint64_t SSTable::addRecordToFile(const std::span<Record> records, const std::filesystem::path& path)
 {
     if (records.empty())
         throw std::runtime_error("Records cannot be empty");
+
+    uint64_t size = 0;
 
     BloomFilter bloomFilter(records.size(), 0.01);
     FileWriter writer(path);
@@ -252,17 +255,22 @@ void SSTable::addRecordToFile(const std::span<Record> records, const std::filesy
         recordsSize += bytesWritten;
         currentBlockSize += bytesWritten;
         bloomFilter.add(key);
+        size += bytesWritten;
     }
 
     const std::vector<std::byte> bloomBytes = BloomFilter::Serialize(bloomFilter);
     writeAll(writer.getFd(), bloomBytes.data(), bloomBytes.size());
+    size += bloomBytes.size();
 
     uint64_t indexSize = 0;
     for (const Index& index : indices)
         indexSize += writeIndex(writer, index);
+    size += indexSize;
 
     writeFooter(writer, recordsSize, bloomBytes.size(), indexSize);
+    size += sizeof(recordsSize) + sizeof(size_t) + sizeof(indexSize);
     writer.finish();
+    return size;
 }
 
 SSTableIterator::SSTableIterator(std::filesystem::path path)
