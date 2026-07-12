@@ -1,9 +1,9 @@
 cmake-build-*/
 .idea/
 .DS_Store
-.omx/
-cmake-build-asan/
-cmake-build-modules/
 .omo/
+.omx/
+.superpowers/
 .vscode/
 .worktrees/
+cmake-build-asan/

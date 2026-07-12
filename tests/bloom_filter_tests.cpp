@@ -1,3 +1,5 @@
+#include "BloomFilter.h"
+
 #include <cstddef>
 #include <stdexcept>
 #include <string>
@@ -5,8 +7,6 @@
 #include <vector>
 
 #include <gtest/gtest.h>
-
-import lsm.bloom;
 
 namespace
 {

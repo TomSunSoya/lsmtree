@@ -11,13 +11,8 @@ add_library(lsmtree_lib
         src/MemTable.cpp
         src/SSTable.cpp
         src/utils.cpp)
+target_include_directories(lsmtree_lib PUBLIC inc)
 target_compile_features(lsmtree_lib PUBLIC cxx_std_23)
-
-target_sources(lsmtree_lib
-        PUBLIC
-        FILE_SET CXX_MODULES
-        BASE_DIRS modules
-        FILES modules/db.cppm modules/sstable.cppm modules/manifest.cppm modules/memtable.cppm modules/bloom.cppm modules/utils.cppm)
 
 enable_testing()
 

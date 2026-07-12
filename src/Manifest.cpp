@@ -1,10 +1,11 @@
-module;
-#include <stdexcept>
-module lsm.manifest;
+#include "Manifest.h"
 
-import lsm.utils;
-import std;
-import std.compat;
+#include <algorithm>
+#include <fstream>
+#include <iterator>
+#include <ranges>
+#include <stdexcept>
+#include <utility>
 
 namespace
 {
@@ -34,12 +35,11 @@ std::string readKey(std::ifstream& input, const char* sizeErrorMessage, const ch
 
 TableMeta readTable(std::ifstream& input)
 {
-    uint64_t number = 0, size = 0;
+    uint64_t number = 0;
     readValue(input, number, "failed to read table's number");
-    readValue(input, size, "failed to read table's size");
     std::string minKey = readKey(input, "failed to read minKey size", "failed to read minKey");
     std::string maxKey = readKey(input, "failed to read maxKey size", "failed to read maxKey");
-    return {number, size, std::move(minKey), std::move(maxKey)};
+    return {number, std::move(minKey), std::move(maxKey)};
 }
 
 template <typename Value> void writeValue(const FileWriter& writer, const Value& value)
@@ -77,12 +77,9 @@ Manifest::Manifest(std::filesystem::path path) : path_(std::move(path))
         return;
 
     uint64_t levelCount = 0;
-    uint8_t formatVersion = 0;
     readValue(input, levelCount, "failed to read level number");
     readValue(input, logNumber_, "failed to read log number");
-    readValue(input, formatVersion, "failed to read version");
-    if (formatVersion != kManifestFormatVersion)
-        throw std::runtime_error("Unsupported manifest version!");
+    readValue(input, formatVersion_, "failed to read version");
     readValue(input, nextTableNumber_, "failed to read next");
 
     levels_.resize(levelCount);
@@ -100,10 +97,10 @@ uint64_t Manifest::nextNumber() const { return nextTableNumber_; }
 
 uint64_t Manifest::allocateNumber() { return nextTableNumber_++; }
 
-void Manifest::addTable(uint64_t number, uint64_t size, std::string_view minKey, std::string_view maxKey,
-                        uint32_t targetLevel)
+void Manifest::addTable(const uint64_t number, const std::string_view minKey, const std::string_view maxKey,
+                        const uint32_t targetLevel)
 {
-    TableMeta table{number, size, std::string(minKey), std::string(maxKey)};
+    TableMeta table{number, std::string(minKey), std::string(maxKey)};
     if (targetLevel >= levels_.size())
         levels_.resize(targetLevel + 1);
 
@@ -113,7 +110,7 @@ void Manifest::addTable(uint64_t number, uint64_t size, std::string_view minKey,
         const auto position =
             std::lower_bound(level.begin(), level.end(), number,
                              [](const TableMeta& candidate, const uint64_t value) { return candidate.number > value; });
-        level.insert(position, table);
+        level.insert(position, std::move(table));
         return;
     }
 
@@ -129,7 +126,7 @@ void Manifest::addTable(uint64_t number, uint64_t size, std::string_view minKey,
 }
 
 void Manifest::replaceTables(const std::vector<uint64_t>& removed, const std::vector<TableMeta>& added,
-                             uint32_t targetLevel)
+                             const uint32_t targetLevel)
 {
     for (auto& level : levels_)
     {
@@ -137,8 +134,8 @@ void Manifest::replaceTables(const std::vector<uint64_t>& removed, const std::ve
                       { return std::ranges::find(removed, table.number) != removed.end(); });
     }
 
-    for (const auto& [number, size, minKey, maxKey] : added)
-        addTable(number, size, minKey, maxKey, targetLevel);
+    for (const auto& [number, minKey, maxKey] : added)
+        addTable(number, minKey, maxKey, targetLevel);
 }
 
 void Manifest::save() const
@@ -148,17 +145,16 @@ void Manifest::save() const
     const uint64_t levelCount = levels_.size();
     writeValue(writer, levelCount);
     writeValue(writer, logNumber_);
-    writeValue(writer, kManifestFormatVersion);
+    writeValue(writer, formatVersion_);
     writeValue(writer, nextTableNumber_);
 
     for (const auto& level : levels_)
     {
         const uint64_t tableCount = level.size();
         writeValue(writer, tableCount);
-        for (const auto& [number, size, minKey, maxKey] : level)
+        for (const auto& [number, minKey, maxKey] : level)
         {
             writeValue(writer, number);
-            writeValue(writer, size);
             writeKey(writer, minKey);
             writeKey(writer, maxKey);
         }
@@ -166,7 +162,7 @@ void Manifest::save() const
     writer.finish();
 }
 
-const std::vector<TableMeta>& Manifest::level(size_t number) const
+const std::vector<TableMeta>& Manifest::level(const size_t number) const
 {
     static const std::vector<TableMeta> emptyLevel;
     if (number >= levels_.size())
@@ -187,7 +183,7 @@ std::set<uint64_t, std::greater<>> Manifest::allTableNumbers() const
     return tableNumbers;
 }
 
-std::optional<TableMeta> Manifest::getTableMeta(uint64_t levelNumber, std::string_view key) const
+std::optional<TableMeta> Manifest::getTableMeta(const uint64_t levelNumber, const std::string_view key) const
 {
     if (levelNumber == 0)
         throw std::invalid_argument("Cannot get ZERO level");

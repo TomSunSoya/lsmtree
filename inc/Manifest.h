@@ -1,11 +1,17 @@
-module;
-export module lsm.manifest;
+#pragma once
 
-import lsm.utils;
-import std;
-import std.compat;
+#include <cstddef>
+#include <cstdint>
+#include <filesystem>
+#include <functional>
+#include <optional>
+#include <set>
+#include <string_view>
+#include <vector>
 
-export class Manifest
+#include "utils.h"
+
+class Manifest
 {
   public:
     explicit Manifest(std::filesystem::path path);
@@ -13,8 +19,7 @@ export class Manifest
     [[nodiscard]] uint64_t nextNumber() const;
     uint64_t allocateNumber();
 
-    void addTable(uint64_t number, uint64_t size, std::string_view minKey, std::string_view maxKey,
-                  uint32_t targetLevel);
+    void addTable(uint64_t number, std::string_view minKey, std::string_view maxKey, uint32_t targetLevel);
     void replaceTables(const std::vector<uint64_t>& removed, const std::vector<TableMeta>& added, uint32_t targetLevel);
     void save() const;
 
@@ -28,10 +33,9 @@ export class Manifest
     [[nodiscard]] std::optional<TableMeta> getTableMeta(uint64_t levelNumber, std::string_view key) const;
 
   private:
-    std::filesystem::path path_{};
+    std::filesystem::path path_;
     std::vector<std::vector<TableMeta>> levels_;
     uint64_t nextTableNumber_{};
+    uint8_t formatVersion_{};
     uint64_t logNumber_{};
-
-    static constexpr uint8_t kManifestFormatVersion = 2;
 };

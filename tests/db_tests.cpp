@@ -1,6 +1,4 @@
-#include <cstdint>
 #include <filesystem>
-#include <fstream>
 #include <limits>
 #include <string>
 #include <string_view>
@@ -9,13 +7,10 @@
 
 #include <gtest/gtest.h>
 
+#include "DB.h"
+#include "Manifest.h"
+#include "SSTable.h"
 #include "test_support.h"
-
-import lsm.utils;
-import lsm.db;
-import lsm.manifest;
-import lsm.memtable;
-import lsm.sstable;
 
 namespace
 {
@@ -95,8 +90,7 @@ void addLevelOneTable(const std::filesystem::path& root, Manifest& manifest,
         ASSERT_NO_THROW(keyRange = SSTable::build(table, tablePath));
     }
 
-    ASSERT_NO_THROW(
-        manifest.addTable(tableNumber, std::filesystem::file_size(tablePath), keyRange.first, keyRange.second, 1));
+    ASSERT_NO_THROW(manifest.addTable(tableNumber, keyRange.first, keyRange.second, 1));
     std::filesystem::remove(walPath);
 }
 
@@ -114,16 +108,6 @@ void expectSSTableValues(const std::filesystem::path& path,
     }
     if (cursor.valid())
         ADD_FAILURE() << "unexpected record in " << path << ": key='" << cursor.current().key << "'";
-}
-
-void overwriteSSTableIndexSize(const std::filesystem::path& path, const uint64_t indexSize)
-{
-    std::fstream file(path, std::ios::binary | std::ios::in | std::ios::out);
-    ASSERT_TRUE(file.is_open());
-
-    file.seekp(-static_cast<std::streamoff>(sizeof(indexSize)), std::ios::end);
-    ASSERT_TRUE(file.write(reinterpret_cast<const char*>(&indexSize), sizeof(indexSize)));
-    ASSERT_TRUE(file.good());
 }
 } // namespace
 
@@ -401,11 +385,10 @@ TEST(DBTest, EmptyFlushDoesNotAllocateSSTableOrRotateWal)
     EXPECT_EQ(0, manifest.nextNumber());
 }
 
-TEST(DBTest, FlushPersistsSSTableMetadataInManifest)
+TEST(DBTest, FlushPersistsSSTableKeyRangeInManifest)
 {
     const std::filesystem::path root("db_tests_flush_persists_key_range");
     const ScopedPathCleanup cleanup(root);
-    const std::filesystem::path tablePath = root / "sstable" / "sst_0.sst";
 
     {
         DB db(root, kManualFlushThreshold);
@@ -420,7 +403,6 @@ TEST(DBTest, FlushPersistsSSTableMetadataInManifest)
     const auto& level = manifest.level(0);
     ASSERT_EQ(1, level.size());
     EXPECT_EQ(0, level[0].number);
-    EXPECT_EQ(std::filesystem::file_size(tablePath), level[0].size);
     EXPECT_EQ("alpha", level[0].minKey);
     EXPECT_EQ("zulu", level[0].maxKey);
 }
@@ -441,25 +423,6 @@ TEST(DBTest, GetFallsBackToFlushedSSTable)
         ASSERT_NO_FATAL_FAILURE(expectGet(db, "beta", "two"));
         expectMissing(db, "gamma");
     }
-}
-
-TEST(DBTest, ReusesCachedSSTableAcrossPointReads)
-{
-    const std::filesystem::path root("db_tests_reuses_cached_sstable");
-    const ScopedPathCleanup cleanup(root);
-    const std::filesystem::path tablePath = root / "sstable" / "sst_0.sst";
-
-    DB db(root, kManualFlushThreshold);
-    ASSERT_NO_FATAL_FAILURE(expectPut(db, "alpha", "one"));
-    ASSERT_NO_FATAL_FAILURE(expectPut(db, "beta", "two"));
-    ASSERT_NO_THROW(db.flush());
-
-    ASSERT_NO_FATAL_FAILURE(expectGet(db, "alpha", "one"));
-
-    // Make constructing a replacement SSTable unable to discover a block. A cached object keeps the metadata
-    // loaded by the first point read and can still locate a different key in the immutable records region.
-    ASSERT_NO_FATAL_FAILURE(overwriteSSTableIndexSize(tablePath, 0));
-    ASSERT_NO_FATAL_FAILURE(expectGet(db, "beta", "two"));
 }
 
 TEST(DBTest, ActiveMemTableOverridesFlushedSSTable)
@@ -727,7 +690,7 @@ TEST(DBTest, CompactPersistsMergedTableAcrossReopen)
     }
 }
 
-TEST(DBTest, CompactPersistsMergedTableMetadataInManifest)
+TEST(DBTest, CompactPersistsMergedKeyRangeInManifest)
 {
     const std::filesystem::path root("db_tests_compact_persists_key_range");
     const ScopedPathCleanup cleanup(root);
@@ -749,7 +712,6 @@ TEST(DBTest, CompactPersistsMergedTableMetadataInManifest)
     const auto& level = manifest.level(1);
     ASSERT_EQ(1, level.size());
     EXPECT_EQ(4, level[0].number);
-    EXPECT_EQ(std::filesystem::file_size(root / "sstable" / "sst_4.sst"), level[0].size);
     EXPECT_EQ("alpha", level[0].minKey);
     EXPECT_EQ("zulu", level[0].maxKey);
 }

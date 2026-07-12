@@ -1,13 +1,15 @@
-export module lsm.db;
+#pragma once
 
-import lsm.utils;
-import lsm.manifest;
-import lsm.memtable;
-import lsm.sstable;
-import std;
-import std.compat;
+#include <filesystem>
+#include <memory>
+#include <string>
+#include <string_view>
+#include <vector>
 
-export class DB
+#include "Manifest.h"
+#include "MemTable.h"
+
+class DB
 {
   public:
     explicit DB(const std::filesystem::path& dataDirectory, uint64_t flushThreshold = 5 * 1024 * 1024,
@@ -24,15 +26,12 @@ export class DB
   private:
     bool searchSSTables(std::string_view key, std::string& value) const;
     Result searchTable(uint64_t tableNumber, std::string_view key, std::string& value) const;
-    void compactLevel0();
-    void maybeCompact();
 
-    std::unique_ptr<MemTable> activeMemTable_{};
-    std::filesystem::path dataDirectory_{};
-    std::filesystem::path walFilePath_{};
-    uint64_t flushThresholdBytes_{};
-    std::unique_ptr<Manifest> manifest_{};
-    uint64_t level0CompactionThreshold_{};
-    uint64_t compactionSliceBytes_{};
-    mutable std::unordered_map<uint64_t, std::unique_ptr<SSTable>> tables_{};
+    std::unique_ptr<MemTable> activeMemTable_;
+    std::filesystem::path dataDirectory_;
+    std::filesystem::path walFilePath_;
+    uint64_t flushThresholdBytes_;
+    std::unique_ptr<Manifest> manifest_;
+    uint64_t level0CompactionThreshold_;
+    uint64_t compactionSliceBytes_;
 };

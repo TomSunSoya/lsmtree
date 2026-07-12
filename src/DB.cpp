@@ -1,13 +1,13 @@
-module;
-#include <filesystem>
-module lsm.db;
+#include "DB.h"
 
-import lsm.utils;
-import lsm.manifest;
-import lsm.memtable;
-import lsm.sstable;
-import std;
-import std.compat;
+#include <algorithm>
+#include <iostream>
+#include <ranges>
+#include <set>
+#include <span>
+#include <stdexcept>
+
+#include "SSTable.h"
 
 namespace
 {
@@ -123,8 +123,8 @@ TableMeta writeCompactionSlice(Manifest& manifest, const std::filesystem::path& 
                                const std::span<Record> records)
 {
     const uint64_t outputNumber = manifest.allocateNumber();
-    const auto fileSize = SSTable::addRecordToFile(records, sstablePath(dataDirectory, outputNumber));
-    return {outputNumber, fileSize, records.front().key, records.back().key};
+    SSTable::addRecordToFile(records, sstablePath(dataDirectory, outputNumber));
+    return {outputNumber, records.front().key, records.back().key};
 }
 
 std::vector<TableMeta> writeCompactionOutput(Manifest& manifest, const std::filesystem::path& dataDirectory,
@@ -233,7 +233,7 @@ void DB::flush()
     manifest_->setLogNumber(nextWALNumber);
 
     const auto [minKey, maxKey] = SSTable::build(*activeMemTable_, tablePath);
-    manifest_->addTable(tableNumber, std::filesystem::file_size(tablePath), minKey, maxKey, 0);
+    manifest_->addTable(tableNumber, minKey, maxKey, 0);
     manifest_->save();
 
     const std::filesystem::path oldWALPath = walFilePath_;
@@ -243,10 +243,30 @@ void DB::flush()
 
     removeFile(oldWALPath, "remove wal file failed");
 
-    maybeCompact();
+    if (manifest_->level(0).size() > level0CompactionThreshold_)
+        compact();
 }
 
-void DB::compact() { compactLevel0(); }
+void DB::compact()
+{
+    if (manifest_->level(0).empty())
+        return;
+
+    const TableNumbers selectedTables = selectCompactionTables(*manifest_);
+    const std::vector<uint64_t> removedTables(selectedTables.begin(), selectedTables.end());
+    const std::vector<std::filesystem::path> inputPaths = tablePaths(dataDirectory_, selectedTables);
+
+    auto iterators = openTableIterators(inputPaths);
+    std::vector<Record> records = mergeSorted(iterators);
+    const std::vector<TableMeta> outputTables =
+        writeCompactionOutput(*manifest_, dataDirectory_, std::span(records), compactionSliceBytes_);
+
+    manifest_->replaceTables(removedTables, outputTables, 1);
+    manifest_->save();
+
+    for (const auto& inputPath : inputPaths)
+        removeFile(inputPath, "remove old sst file failed");
+}
 
 std::vector<Record> DB::scan(const std::string_view start, const std::string_view end) const
 {
@@ -264,19 +284,13 @@ std::vector<Record> DB::scan(const std::string_view start, const std::string_vie
     return std::ranges::to<std::vector>(visibleRecords);
 }
 
-Result DB::searchTable(uint64_t tableNumber, std::string_view key, std::string& value) const
+Result DB::searchTable(const uint64_t tableNumber, const std::string_view key, std::string& value) const
 {
-    if (auto iter = tables_.find(tableNumber); iter != tables_.end())
-    {
-        return iter->second->get(key, value);
-    }
-    auto sstable = std::make_unique<SSTable>(sstablePath(dataDirectory_, tableNumber));
-    const auto res = sstable->get(key, value);
-    tables_[tableNumber] = std::move(sstable);
-    return res;
+    const SSTable table(sstablePath(dataDirectory_, tableNumber));
+    return table.get(key, value);
 }
 
-bool DB::searchSSTables(std::string_view key, std::string& value) const
+bool DB::searchSSTables(const std::string_view key, std::string& value) const
 {
     for (const TableMeta& table : manifest_->level(0))
     {
@@ -303,44 +317,4 @@ bool DB::searchSSTables(std::string_view key, std::string& value) const
             return false;
     }
     return false;
-}
-
-void DB::compactLevel0()
-{
-    if (manifest_->level(0).empty())
-        return;
-
-    const TableNumbers selectedTables = selectCompactionTables(*manifest_);
-    const std::vector<uint64_t> removedTables(selectedTables.begin(), selectedTables.end());
-    const std::vector<std::filesystem::path> inputPaths = tablePaths(dataDirectory_, selectedTables);
-
-    auto iterators = openTableIterators(inputPaths);
-    std::vector<Record> records = mergeSorted(iterators);
-    const std::vector<TableMeta> outputTables =
-        writeCompactionOutput(*manifest_, dataDirectory_, std::span(records), compactionSliceBytes_);
-
-    manifest_->replaceTables(removedTables, outputTables, 1);
-    manifest_->save();
-
-    for (const auto& inputPath : inputPaths)
-        removeFile(inputPath, "remove old sst file failed");
-
-    for (auto tableNumber : removedTables)
-        tables_.erase(tableNumber);
-}
-
-void DB::maybeCompact()
-{
-    while (true)
-    {
-        if (manifest_->level(0).size() > level0CompactionThreshold_)
-        {
-            compactLevel0();
-            continue;
-        }
-        else
-        {
-            break;
-        }
-    }
 }

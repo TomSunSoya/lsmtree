@@ -6,10 +6,8 @@
 
 #include <gtest/gtest.h>
 
+#include "MemTable.h"
 #include "test_support.h"
-
-import lsm.utils;
-import lsm.memtable;
 
 namespace
 {

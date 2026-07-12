@@ -1,17 +1,28 @@
-export module lsm.sstable;
+#pragma once
 
-import lsm.utils;
-import lsm.bloom;
-import lsm.memtable;
-import std;
-import std.compat;
+#include <cstddef>
+#include <cstdint>
+#include <filesystem>
+#include <fstream>
+#include <memory>
+#include <optional>
+#include <span>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
 
-export class SSTable
+#include "BloomFilter.h"
+#include "utils.h"
+
+class MemTable;
+
+class SSTable
 {
   public:
     static std::pair<std::string, std::string> build(const MemTable& memTable, const std::filesystem::path& path);
     static void cleanupOrphanedTemps(const std::filesystem::path& directory);
-    static uint64_t addRecordToFile(std::span<Record> records, const std::filesystem::path& path);
+    static void addRecordToFile(std::span<Record> records, const std::filesystem::path& path);
 
     explicit SSTable(std::filesystem::path path);
 
@@ -28,10 +39,9 @@ export class SSTable
     uint64_t bloomSize_{};
     uint64_t indexSize_{};
     std::unique_ptr<BloomFilter> bloomFilter_{};
-    std::vector<Index> indices_{};
 };
 
-export class SSTableIterator : public Iterator
+class SSTableIterator : public Iterator
 {
   public:
     explicit SSTableIterator(std::filesystem::path path);

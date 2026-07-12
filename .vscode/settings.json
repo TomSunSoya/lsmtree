@@ -1,8 +1,0 @@
-{
-    "clangd.path": "/opt/homebrew/opt/llvm/bin/clangd",
-    "editor.semanticTokenColorCustomizations": {
-        "rules": {
-            "keyword": "#569CD6"
-        }
-    }
-}

@@ -1,15 +1,14 @@
-module;
+#include "SSTable.h"
 
+#include <algorithm>
+#include <array>
 #include <cassert>
-#include <cstdint>
+#include <cstring>
+#include <iterator>
+#include <stdexcept>
+#include <utility>
 
-module lsm.sstable;
-
-import lsm.utils;
-import lsm.bloom;
-import lsm.memtable;
-import std;
-import std.compat;
+#include "MemTable.h"
 
 namespace
 {
@@ -159,7 +158,6 @@ SSTable::SSTable(std::filesystem::path path) : path_(std::move(path))
     std::vector<std::byte> bloomBytes(bloomSize_);
     input.read(reinterpret_cast<char*>(bloomBytes.data()), bloomSize_);
     bloomFilter_ = std::make_unique<BloomFilter>(BloomFilter::fromBytes(bloomBytes));
-    indices_ = readSparseIndex();
 }
 
 Result SSTable::get(const std::string_view key, std::string& value) const
@@ -219,23 +217,22 @@ std::vector<Index> SSTable::readSparseIndex() const
 
 std::optional<std::pair<Index, uint64_t>> SSTable::getBlock(const std::string_view key) const
 {
+    const std::vector<Index> indices = readSparseIndex();
     const auto position =
-        std::upper_bound(indices_.begin(), indices_.end(), key,
+        std::upper_bound(indices.begin(), indices.end(), key,
                          [](const std::string_view value, const Index& index) { return index.key > value; });
 
-    if (position == indices_.begin())
+    if (position == indices.begin())
         return std::nullopt;
 
-    const uint64_t blockEnd = position == indices_.end() ? recordsSize_ : position->offset;
+    const uint64_t blockEnd = position == indices.end() ? recordsSize_ : position->offset;
     return std::make_pair(*std::prev(position), blockEnd);
 }
 
-uint64_t SSTable::addRecordToFile(const std::span<Record> records, const std::filesystem::path& path)
+void SSTable::addRecordToFile(const std::span<Record> records, const std::filesystem::path& path)
 {
     if (records.empty())
         throw std::runtime_error("Records cannot be empty");
-
-    uint64_t size = 0;
 
     BloomFilter bloomFilter(records.size(), 0.01);
     FileWriter writer(path);
@@ -255,22 +252,17 @@ uint64_t SSTable::addRecordToFile(const std::span<Record> records, const std::fi
         recordsSize += bytesWritten;
         currentBlockSize += bytesWritten;
         bloomFilter.add(key);
-        size += bytesWritten;
     }
 
     const std::vector<std::byte> bloomBytes = BloomFilter::Serialize(bloomFilter);
     writeAll(writer.getFd(), bloomBytes.data(), bloomBytes.size());
-    size += bloomBytes.size();
 
     uint64_t indexSize = 0;
     for (const Index& index : indices)
         indexSize += writeIndex(writer, index);
-    size += indexSize;
 
     writeFooter(writer, recordsSize, bloomBytes.size(), indexSize);
-    size += sizeof(recordsSize) + sizeof(size_t) + sizeof(indexSize);
     writer.finish();
-    return size;
 }
 
 SSTableIterator::SSTableIterator(std::filesystem::path path)

@@ -1,13 +1,14 @@
-module;
+#include "utils.h"
 
 #include <cerrno>
+#include <cstdio>
 #include <fcntl.h>
+#include <format>
+#include <queue>
+#include <stdexcept>
+#include <system_error>
 #include <unistd.h>
-
-module lsm.utils;
-
-import std;
-import std.compat;
+#include <utility>
 
 namespace
 {

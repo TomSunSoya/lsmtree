@@ -1,15 +1,15 @@
-module;
+#include "MemTable.h"
 
 #include <cassert>
+#include <cctype>
 #include <cerrno>
 #include <fcntl.h>
+#include <fstream>
+#include <iostream>
+#include <sstream>
+#include <stdexcept>
+#include <system_error>
 #include <unistd.h>
-
-module lsm.memtable;
-
-import lsm.utils;
-import std;
-import std.compat;
 
 namespace
 {

@@ -1,3 +1,5 @@
+#include "utils.h"
+
 #include <cassert>
 #include <cstddef>
 #include <memory>
@@ -6,8 +8,6 @@
 #include <vector>
 
 #include <gtest/gtest.h>
-
-import lsm.utils;
 
 namespace
 {
