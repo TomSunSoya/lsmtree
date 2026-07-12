@@ -26,7 +26,7 @@ export class Manifest
     [[nodiscard]] std::optional<TableMeta> getTableMeta(uint64_t levelNumber, std::string_view key) const;
 
   private:
-    std::filesystem::path path_;
+    std::filesystem::path path_{};
     std::vector<std::vector<TableMeta>> levels_;
     uint64_t nextTableNumber_{};
     uint8_t formatVersion_{};

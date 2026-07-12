@@ -3,6 +3,7 @@ export module lsm.db;
 import lsm.utils;
 import lsm.manifest;
 import lsm.memtable;
+import lsm.sstable;
 import std;
 import std.compat;
 
@@ -31,4 +32,5 @@ export class DB
     std::unique_ptr<Manifest> manifest_{};
     uint64_t level0CompactionThreshold_{};
     uint64_t compactionSliceBytes_{};
+    mutable std::unordered_map<uint64_t, std::unique_ptr<SSTable>> tables_{};
 };

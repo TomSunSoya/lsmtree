@@ -264,6 +264,9 @@ void DB::compact()
 
     for (const auto& inputPath : inputPaths)
         removeFile(inputPath, "remove old sst file failed");
+
+    for (auto tableNumber : removedTables)
+        tables_.erase(tableNumber);
 }
 
 std::vector<Record> DB::scan(const std::string_view start, const std::string_view end) const
@@ -284,8 +287,14 @@ std::vector<Record> DB::scan(const std::string_view start, const std::string_vie
 
 Result DB::searchTable(const uint64_t tableNumber, const std::string_view key, std::string& value) const
 {
-    const SSTable table(sstablePath(dataDirectory_, tableNumber));
-    return table.get(key, value);
+    if (auto iter = tables_.find(tableNumber); iter != tables_.end())
+    {
+        return iter->second->get(key, value);
+    }
+    auto sstable = std::make_unique<SSTable>(sstablePath(dataDirectory_, tableNumber));
+    const auto res = sstable->get(key, value);
+    tables_[tableNumber] = std::move(sstable);
+    return res;
 }
 
 bool DB::searchSSTables(const std::string_view key, std::string& value) const

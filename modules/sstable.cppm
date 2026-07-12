@@ -28,6 +28,7 @@ export class SSTable
     uint64_t bloomSize_{};
     uint64_t indexSize_{};
     std::unique_ptr<BloomFilter> bloomFilter_{};
+    std::vector<Index> indices_{};
 };
 
 export class SSTableIterator : public Iterator

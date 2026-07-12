@@ -158,6 +158,7 @@ SSTable::SSTable(std::filesystem::path path) : path_(std::move(path))
     std::vector<std::byte> bloomBytes(bloomSize_);
     input.read(reinterpret_cast<char*>(bloomBytes.data()), bloomSize_);
     bloomFilter_ = std::make_unique<BloomFilter>(BloomFilter::fromBytes(bloomBytes));
+    indices_ = readSparseIndex();
 }
 
 Result SSTable::get(const std::string_view key, std::string& value) const
@@ -217,15 +218,14 @@ std::vector<Index> SSTable::readSparseIndex() const
 
 std::optional<std::pair<Index, uint64_t>> SSTable::getBlock(const std::string_view key) const
 {
-    const std::vector<Index> indices = readSparseIndex();
     const auto position =
-        std::upper_bound(indices.begin(), indices.end(), key,
+        std::upper_bound(indices_.begin(), indices_.end(), key,
                          [](const std::string_view value, const Index& index) { return index.key > value; });
 
-    if (position == indices.begin())
+    if (position == indices_.begin())
         return std::nullopt;
 
-    const uint64_t blockEnd = position == indices.end() ? recordsSize_ : position->offset;
+    const uint64_t blockEnd = position == indices_.end() ? recordsSize_ : position->offset;
     return std::make_pair(*std::prev(position), blockEnd);
 }
 
