@@ -16,6 +16,12 @@ target_compile_features(lsmtree_lib PUBLIC cxx_std_23)
 
 enable_testing()
 
+# Prefer Homebrew's GTest over other installs on PATH (e.g. anaconda ships a
+# stale 1.11 config whose dylibs no longer exist). Explicit -DGTest_DIR still wins.
+if(NOT DEFINED GTest_DIR AND EXISTS "/opt/homebrew/opt/googletest/lib/cmake/GTest")
+    set(GTest_DIR "/opt/homebrew/opt/googletest/lib/cmake/GTest" CACHE PATH "GTest CMake package directory")
+endif()
+
 find_package(GTest CONFIG REQUIRED)
 
 include(GoogleTest)
