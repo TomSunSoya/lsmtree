@@ -9,11 +9,6 @@
 
 namespace
 {
-bool rangesOverlap(const TableMeta& table, const std::string_view minKey, const std::string_view maxKey)
-{
-    return minKey <= table.maxKey && table.minKey <= maxKey;
-}
-
 template <typename Value> void readValue(std::ifstream& input, Value& value, const char* errorMessage)
 {
     input.read(reinterpret_cast<char*>(&value), sizeof(value));

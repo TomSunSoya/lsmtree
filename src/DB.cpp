@@ -106,6 +106,16 @@ std::vector<std::filesystem::path> tablePaths(const std::filesystem::path& dataD
     return paths;
 }
 
+std::vector<std::filesystem::path> tablePaths(const std::filesystem::path& dataDirectory,
+                                              const std::vector<TableMeta>& tableNumbers)
+{
+    std::vector<std::filesystem::path> paths;
+    paths.reserve(tableNumbers.size());
+    for (const auto& table : tableNumbers)
+        paths.push_back(sstablePath(dataDirectory, table.number));
+    return paths;
+}
+
 std::vector<std::unique_ptr<Iterator>> openTableIterators(const std::vector<std::filesystem::path>& paths)
 {
     std::vector<std::unique_ptr<Iterator>> iterators;
@@ -346,7 +356,47 @@ void DB::maybeCompact()
     }
 }
 
-void DB::compactLevel(uint64_t n) {}
+void DB::compactLevel(uint64_t n)
+{
+    auto& tables = manifest_->level(n);
+    TableMeta table;
+    if (!cursors_.contains(n))
+    {
+        cursors_.emplace(n, tables.front().maxKey);
+        table = tables.front();
+    }
+    else
+    {
+        auto tableIt = std::ranges::upper_bound(tables, cursors_[n], std::less{}, &TableMeta::minKey);
+        if (tableIt == tables.end())
+            tableIt = tables.begin();
+        table = *tableIt;
+    }
+    cursors_[n] = table.maxKey;
+    std::vector<TableMeta> selectedTables;
+    selectedTables.push_back(table);
+    getNextCrossTable(selectedTables, n + 1);
+
+    std::vector<uint64_t> removedTables;
+    removedTables.reserve(selectedTables.size());
+    for (const auto& removeTable : selectedTables)
+        removedTables.push_back(removeTable.number);
+
+    const std::vector<std::filesystem::path> inputPaths = tablePaths(dataDirectory_, selectedTables);
+    auto iterators = openTableIterators(inputPaths);
+    std::vector<Record> records = mergeSorted(iterators);
+    const std::vector<TableMeta> outputTables =
+        writeCompactionOutput(*manifest_, dataDirectory_, std::span(records), compactionSliceBytes_);
+
+    manifest_->replaceTables(removedTables, outputTables, n + 1);
+    manifest_->save();
+
+    for (const auto& inputPath : inputPaths)
+        removeFile(inputPath, "remove old sst file failed");
+
+    for (auto tableNumber : removedTables)
+        tables_.erase(tableNumber);
+}
 
 uint64_t DB::levelBytes(const uint64_t level) const
 {
@@ -360,7 +410,7 @@ uint64_t DB::levelBytes(const uint64_t level) const
 uint64_t DB::budgetFor(const uint64_t n) const
 {
     uint64_t totalBytes = compactBaseThresholdBytes_;
-    for (uint64_t i = 2; i < manifest_->levelCount(); ++i)
+    for (uint64_t i = 2; i <= n; ++i)
         totalBytes *= 10;
     return totalBytes;
 }
@@ -373,4 +423,19 @@ std::optional<uint64_t> DB::getFirstOverLevel() const
             return i;
     }
     return std::nullopt;
+}
+
+void DB::getNextCrossTable(std::vector<TableMeta>& tables, const uint64_t nextLevel) const
+{
+    if (nextLevel >= manifest_->levelCount())
+        return;
+
+    auto& nextLevelTables = manifest_->level(nextLevel);
+    tables.reserve(nextLevelTables.size());
+    const auto curTable = tables.front();
+    for (const auto& table : nextLevelTables)
+    {
+        if (rangesOverlap(table, curTable.minKey, curTable.maxKey))
+            tables.push_back(table);
+    }
 }

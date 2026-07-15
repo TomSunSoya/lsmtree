@@ -62,6 +62,11 @@ constexpr std::string_view kSSTableSuffix = ".sst";
 void removeFile(const std::filesystem::path& path, const char* message);
 void writeAll(int fd, const void* data, std::size_t size);
 
+inline bool rangesOverlap(const TableMeta& table, const std::string_view minKey, const std::string_view maxKey)
+{
+    return minKey <= table.maxKey && table.minKey <= maxKey;
+}
+
 class FdGuard
 {
   public:

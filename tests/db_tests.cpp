@@ -2,6 +2,7 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -76,8 +77,9 @@ void expectOneTableInLevelZeroAndOne(const std::filesystem::path& root)
     ASSERT_EQ(1, manifest.level(1).size());
 }
 
-void addLevelOneTable(const std::filesystem::path& root, Manifest& manifest,
-                      const std::vector<std::pair<std::string, std::string>>& records)
+void addTableAtLevel(const std::filesystem::path& root, Manifest& manifest,
+                     const std::vector<std::pair<std::string, std::string>>& records, const uint32_t targetLevel,
+                     const std::optional<uint64_t> recordedSize = std::nullopt)
 {
     const auto tableNumber = manifest.allocateNumber();
     const auto walPath = root / ("fixture_" + std::to_string(tableNumber) + ".wal");
@@ -92,9 +94,15 @@ void addLevelOneTable(const std::filesystem::path& root, Manifest& manifest,
         ASSERT_NO_THROW(keyRange = SSTable::build(table, tablePath));
     }
 
-    ASSERT_NO_THROW(
-        manifest.addTable(tableNumber, std::filesystem::file_size(tablePath), keyRange.first, keyRange.second, 1));
+    ASSERT_NO_THROW(manifest.addTable(tableNumber, recordedSize.value_or(std::filesystem::file_size(tablePath)),
+                                      keyRange.first, keyRange.second, targetLevel));
     std::filesystem::remove(walPath);
+}
+
+void addLevelOneTable(const std::filesystem::path& root, Manifest& manifest,
+                      const std::vector<std::pair<std::string, std::string>>& records)
+{
+    addTableAtLevel(root, manifest, records, 1);
 }
 
 void expectSSTableValues(const std::filesystem::path& path,
@@ -1128,6 +1136,266 @@ TEST(DBTest, AutoCompactMovesL0TablesToL1AndSurvivesReopen)
         ASSERT_NO_FATAL_FAILURE(expectGet(db, "middle", "value"));
         ASSERT_NO_FATAL_FAILURE(expectGet(db, "zulu", "last"));
     }
+}
+
+TEST(DBTest, FlushCascadesLevelZeroCompactionIntoLevelTwoWithoutAnotherFlush)
+{
+    const std::filesystem::path root("db_tests_flush_cascades_to_l2");
+    const ScopedPathCleanup cleanup(root);
+    constexpr uint64_t compactThreshold = 1;
+    constexpr uint64_t baseBudget = 64;
+
+    DB db(root, kManualFlushThreshold, compactThreshold, kManualFlushThreshold, baseBudget);
+    ASSERT_NO_FATAL_FAILURE(expectPut(db, "alpha", "value-alpha-0123456789"));
+    ASSERT_NO_FATAL_FAILURE(expectPut(db, "bravo", "value-bravo-0123456789"));
+    ASSERT_NO_THROW(db.flush());
+
+    {
+        const Manifest beforeCascadingFlush(root / "MANIFEST");
+        ASSERT_EQ(1, beforeCascadingFlush.level(0).size());
+        EXPECT_TRUE(beforeCascadingFlush.level(1).empty());
+        EXPECT_TRUE(beforeCascadingFlush.level(2).empty());
+    }
+
+    ASSERT_NO_FATAL_FAILURE(expectPut(db, "charlie", "value-charlie-0123456789"));
+    ASSERT_NO_FATAL_FAILURE(expectPut(db, "delta", "value-delta-0123456789"));
+    ASSERT_NO_THROW(db.flush());
+
+    {
+        const Manifest afterCascadingFlush(root / "MANIFEST");
+        EXPECT_TRUE(afterCascadingFlush.level(0).empty());
+        EXPECT_TRUE(afterCascadingFlush.level(1).empty());
+        ASSERT_EQ(1, afterCascadingFlush.level(2).size());
+        EXPECT_GT(afterCascadingFlush.level(2).front().size, baseBudget);
+        EXPECT_LE(afterCascadingFlush.level(2).front().size, 10 * baseBudget);
+    }
+
+    ASSERT_NO_FATAL_FAILURE(expectGet(db, "alpha", "value-alpha-0123456789"));
+    ASSERT_NO_FATAL_FAILURE(expectGet(db, "bravo", "value-bravo-0123456789"));
+    ASSERT_NO_FATAL_FAILURE(expectGet(db, "charlie", "value-charlie-0123456789"));
+    ASSERT_NO_FATAL_FAILURE(expectGet(db, "delta", "value-delta-0123456789"));
+}
+
+TEST(DBTest, LevelOneCompactionUsesBaseByteBudgetWhenDeeperLevelsExist)
+{
+    const std::filesystem::path root("db_tests_l1_uses_base_budget");
+    const ScopedPathCleanup cleanup(root);
+    constexpr uint64_t baseBudget = 1000;
+
+    {
+        const DB db(root, kManualFlushThreshold);
+    }
+
+    uint64_t levelOneNumber = 0;
+    {
+        Manifest manifest(root / "MANIFEST");
+        ASSERT_NO_FATAL_FAILURE(addTableAtLevel(root, manifest, {{"alpha", "one"}}, 1, baseBudget + 1));
+        ASSERT_NO_FATAL_FAILURE(addTableAtLevel(root, manifest, {{"zulu", "last"}}, 2, 1));
+        levelOneNumber = manifest.level(1).front().number;
+        ASSERT_NO_THROW(manifest.save());
+    }
+
+    {
+        DB db(root, kManualFlushThreshold, kManualFlushThreshold, kManualFlushThreshold, baseBudget);
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "trigger", "value"));
+        ASSERT_NO_THROW(db.flush());
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "alpha", "one"));
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "zulu", "last"));
+    }
+
+    const Manifest manifest(root / "MANIFEST");
+    EXPECT_TRUE(manifest.level(1).empty());
+    ASSERT_EQ(2, manifest.level(2).size());
+    EXPECT_FALSE(std::filesystem::exists(sstablePath(root, levelOneNumber)));
+}
+
+TEST(DBTest, LevelTwoCompactionUsesTenTimesBaseBudgetWhenLevelThreeExists)
+{
+    const std::filesystem::path root("db_tests_l2_uses_ten_times_base_budget");
+    const ScopedPathCleanup cleanup(root);
+    constexpr uint64_t baseBudget = 1000;
+
+    {
+        const DB db(root, kManualFlushThreshold);
+    }
+
+    uint64_t levelTwoNumber = 0;
+    {
+        Manifest manifest(root / "MANIFEST");
+        ASSERT_NO_FATAL_FAILURE(addTableAtLevel(root, manifest, {{"alpha", "one"}}, 2, 10 * baseBudget + 1));
+        ASSERT_NO_FATAL_FAILURE(addTableAtLevel(root, manifest, {{"zulu", "last"}}, 3, 1));
+        levelTwoNumber = manifest.level(2).front().number;
+        ASSERT_NO_THROW(manifest.save());
+    }
+
+    {
+        DB db(root, kManualFlushThreshold, kManualFlushThreshold, kManualFlushThreshold, baseBudget);
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "trigger", "value"));
+        ASSERT_NO_THROW(db.flush());
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "alpha", "one"));
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "zulu", "last"));
+    }
+
+    const Manifest manifest(root / "MANIFEST");
+    EXPECT_TRUE(manifest.level(2).empty());
+    ASSERT_EQ(2, manifest.level(3).size());
+    EXPECT_FALSE(std::filesystem::exists(sstablePath(root, levelTwoNumber)));
+}
+
+TEST(DBTest, LevelTwoCompactionDoesNotRunAtExactlyTenTimesBaseBudget)
+{
+    const std::filesystem::path root("db_tests_l2_equal_budget_no_compact");
+    const ScopedPathCleanup cleanup(root);
+    constexpr uint64_t baseBudget = 1000;
+
+    {
+        const DB db(root, kManualFlushThreshold);
+    }
+
+    uint64_t levelTwoNumber = 0;
+    {
+        Manifest manifest(root / "MANIFEST");
+        ASSERT_NO_FATAL_FAILURE(addTableAtLevel(root, manifest, {{"alpha", "one"}}, 2, 10 * baseBudget));
+        ASSERT_NO_FATAL_FAILURE(addTableAtLevel(root, manifest, {{"zulu", "last"}}, 3, 1));
+        levelTwoNumber = manifest.level(2).front().number;
+        ASSERT_NO_THROW(manifest.save());
+    }
+
+    {
+        DB db(root, kManualFlushThreshold, kManualFlushThreshold, kManualFlushThreshold, baseBudget);
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "trigger", "value"));
+        ASSERT_NO_THROW(db.flush());
+    }
+
+    const Manifest manifest(root / "MANIFEST");
+    ASSERT_EQ(1, manifest.level(2).size());
+    EXPECT_EQ(levelTwoNumber, manifest.level(2).front().number);
+    ASSERT_EQ(1, manifest.level(3).size());
+    EXPECT_TRUE(std::filesystem::is_regular_file(sstablePath(root, levelTwoNumber)));
+}
+
+TEST(DBTest, LevelCompactionStartsAtFirstTableAndAdvancesCursorWithinOneDBInstance)
+{
+    const std::filesystem::path root("db_tests_level_compaction_cursor");
+    const ScopedPathCleanup cleanup(root);
+
+    {
+        const DB db(root, kManualFlushThreshold);
+    }
+
+    uint64_t firstNumber = 0;
+    uint64_t secondNumber = 0;
+    uint64_t thirdNumber = 0;
+    uint64_t baseBudget = 0;
+    {
+        Manifest manifest(root / "MANIFEST");
+        ASSERT_NO_FATAL_FAILURE(addTableAtLevel(root, manifest, {{"aa", "value"}}, 1));
+        ASSERT_NO_FATAL_FAILURE(addTableAtLevel(root, manifest, {{"gg", "value"}}, 1));
+        ASSERT_NO_FATAL_FAILURE(addTableAtLevel(root, manifest, {{"mm", "value"}}, 1));
+
+        const auto& levelOne = manifest.level(1);
+        ASSERT_EQ(3, levelOne.size());
+        ASSERT_EQ(levelOne[0].size, levelOne[1].size);
+        ASSERT_EQ(levelOne[1].size, levelOne[2].size);
+        firstNumber = levelOne[0].number;
+        secondNumber = levelOne[1].number;
+        thirdNumber = levelOne[2].number;
+        baseBudget = levelOne[1].size + levelOne[2].size;
+        ASSERT_NO_THROW(manifest.save());
+    }
+
+    const auto firstPath = sstablePath(root, firstNumber);
+    const auto secondPath = sstablePath(root, secondNumber);
+    const auto thirdPath = sstablePath(root, thirdNumber);
+
+    DB db(root, kManualFlushThreshold, kManualFlushThreshold, kManualFlushThreshold, baseBudget);
+    ASSERT_NO_FATAL_FAILURE(expectPut(db, "00", "value"));
+    ASSERT_NO_THROW(db.flush());
+
+    EXPECT_FALSE(std::filesystem::exists(firstPath));
+    EXPECT_TRUE(std::filesystem::is_regular_file(secondPath));
+    EXPECT_TRUE(std::filesystem::is_regular_file(thirdPath));
+    {
+        const Manifest afterFirstCompaction(root / "MANIFEST");
+        ASSERT_EQ(2, afterFirstCompaction.level(1).size());
+        EXPECT_EQ("gg", afterFirstCompaction.level(1)[0].minKey);
+        EXPECT_EQ("mm", afterFirstCompaction.level(1)[1].minKey);
+        ASSERT_EQ(1, afterFirstCompaction.level(2).size());
+        EXPECT_EQ("aa", afterFirstCompaction.level(2).front().minKey);
+    }
+
+    ASSERT_NO_THROW(db.compact());
+    ASSERT_NO_FATAL_FAILURE(expectPut(db, "yy", "value"));
+    ASSERT_NO_THROW(db.flush());
+
+    EXPECT_FALSE(std::filesystem::exists(secondPath));
+    EXPECT_TRUE(std::filesystem::is_regular_file(thirdPath));
+    {
+        const Manifest afterSecondCompaction(root / "MANIFEST");
+        ASSERT_EQ(2, afterSecondCompaction.level(1).size());
+        EXPECT_EQ("00", afterSecondCompaction.level(1)[0].minKey);
+        EXPECT_EQ("mm", afterSecondCompaction.level(1)[1].minKey);
+        ASSERT_EQ(2, afterSecondCompaction.level(2).size());
+        EXPECT_EQ("aa", afterSecondCompaction.level(2)[0].minKey);
+        EXPECT_EQ("gg", afterSecondCompaction.level(2)[1].minKey);
+    }
+}
+
+TEST(DBTest, LevelCompactionMergesOnlyNextLevelTablesThatOverlapAtInclusiveBounds)
+{
+    const std::filesystem::path root("db_tests_level_compaction_inclusive_overlap");
+    const ScopedPathCleanup cleanup(root);
+    constexpr uint64_t baseBudget = 1000;
+
+    {
+        const DB db(root, kManualFlushThreshold);
+    }
+
+    uint64_t sourceNumber = 0;
+    uint64_t leftOverlappingNumber = 0;
+    uint64_t rightOverlappingNumber = 0;
+    uint64_t disjointNumber = 0;
+    {
+        Manifest manifest(root / "MANIFEST");
+        ASSERT_NO_FATAL_FAILURE(
+            addTableAtLevel(root, manifest, {{"cc", "new-cc"}, {"ee", "new-ee"}}, 1, 10 * baseBudget + 1));
+        ASSERT_NO_FATAL_FAILURE(addTableAtLevel(root, manifest, {{"aa", "old-aa"}, {"cc", "old-cc"}}, 2, 1));
+        ASSERT_NO_FATAL_FAILURE(addTableAtLevel(root, manifest, {{"ee", "old-ee"}, {"gg", "old-gg"}}, 2, 1));
+        ASSERT_NO_FATAL_FAILURE(addTableAtLevel(root, manifest, {{"xx", "old-xx"}, {"zz", "old-zz"}}, 2, 1));
+        sourceNumber = manifest.level(1).front().number;
+        leftOverlappingNumber = manifest.level(2)[0].number;
+        rightOverlappingNumber = manifest.level(2)[1].number;
+        disjointNumber = manifest.level(2)[2].number;
+        ASSERT_NO_THROW(manifest.save());
+    }
+
+    const auto sourcePath = sstablePath(root, sourceNumber);
+    const auto leftOverlappingPath = sstablePath(root, leftOverlappingNumber);
+    const auto rightOverlappingPath = sstablePath(root, rightOverlappingNumber);
+    const auto disjointPath = sstablePath(root, disjointNumber);
+
+    {
+        DB db(root, kManualFlushThreshold, kManualFlushThreshold, kManualFlushThreshold, baseBudget);
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "trigger", "value"));
+        ASSERT_NO_THROW(db.flush());
+
+        EXPECT_FALSE(std::filesystem::exists(sourcePath));
+        EXPECT_FALSE(std::filesystem::exists(leftOverlappingPath));
+        EXPECT_FALSE(std::filesystem::exists(rightOverlappingPath));
+        EXPECT_TRUE(std::filesystem::is_regular_file(disjointPath));
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "aa", "old-aa"));
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "cc", "new-cc"));
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "ee", "new-ee"));
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "gg", "old-gg"));
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "xx", "old-xx"));
+    }
+
+    const Manifest manifest(root / "MANIFEST");
+    EXPECT_TRUE(manifest.level(1).empty());
+    ASSERT_EQ(2, manifest.level(2).size());
+    EXPECT_EQ("aa", manifest.level(2)[0].minKey);
+    EXPECT_EQ("gg", manifest.level(2)[0].maxKey);
+    EXPECT_EQ(disjointNumber, manifest.level(2)[1].number);
 }
 
 TEST(DBTest, LevelZeroValueWinsOverLevelOneForSameKey)

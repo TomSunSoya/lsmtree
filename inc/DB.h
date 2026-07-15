@@ -35,6 +35,7 @@ class DB
     uint64_t levelBytes(uint64_t level) const;
     uint64_t budgetFor(uint64_t n) const;
     std::optional<uint64_t> getFirstOverLevel() const;
+    void getNextCrossTable(std::vector<TableMeta>& tables, uint64_t nextLevel) const;
 
     std::unique_ptr<MemTable> activeMemTable_;
     std::filesystem::path dataDirectory_;
@@ -44,5 +45,6 @@ class DB
     uint64_t level0CompactionThreshold_;
     uint64_t compactionSliceBytes_;
     uint64_t compactBaseThresholdBytes_;
+    std::unordered_map<uint64_t, std::string> cursors_;
     mutable std::unordered_map<uint64_t, std::unique_ptr<SSTable>> tables_{};
 };
