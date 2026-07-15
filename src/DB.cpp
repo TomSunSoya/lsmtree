@@ -175,9 +175,9 @@ std::vector<std::filesystem::path> selectScanTables(const Manifest& manifest,
 } // namespace
 
 DB::DB(const std::filesystem::path& dataDirectory, const uint64_t flushThreshold, const uint64_t compactThreshold,
-       const uint64_t sliceThreshold)
+       const uint64_t sliceThreshold, const uint64_t compactBaseThresholdBytes)
     : flushThresholdBytes_(flushThreshold), level0CompactionThreshold_(compactThreshold),
-      compactionSliceBytes_(sliceThreshold)
+      compactionSliceBytes_(sliceThreshold), compactBaseThresholdBytes_(compactBaseThresholdBytes)
 {
     ensureDataDirectory(dataDirectory);
 
@@ -339,9 +339,38 @@ void DB::maybeCompact()
             compactLevel0();
             continue;
         }
-        else
-        {
+        auto overLevel = getFirstOverLevel();
+        if (!overLevel)
             break;
-        }
+        compactLevel(*overLevel);
     }
+}
+
+void DB::compactLevel(uint64_t n) {}
+
+uint64_t DB::levelBytes(const uint64_t level) const
+{
+    auto& tables = manifest_->level(level);
+    uint64_t totalBytes = 0;
+    for (const auto& table : tables)
+        totalBytes += table.size;
+    return totalBytes;
+}
+
+uint64_t DB::budgetFor(const uint64_t n) const
+{
+    uint64_t totalBytes = compactBaseThresholdBytes_;
+    for (uint64_t i = 2; i < manifest_->levelCount(); ++i)
+        totalBytes *= 10;
+    return totalBytes;
+}
+
+std::optional<uint64_t> DB::getFirstOverLevel() const
+{
+    for (uint64_t i = 1; i < manifest_->levelCount(); ++i)
+    {
+        if (budgetFor(i) < levelBytes(i))
+            return i;
+    }
+    return std::nullopt;
 }

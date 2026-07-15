@@ -15,7 +15,8 @@ class DB
 {
   public:
     explicit DB(const std::filesystem::path& dataDirectory, uint64_t flushThreshold = 5 * 1024 * 1024,
-                uint64_t compactThreshold = 4, uint64_t sliceThreshold = 4 * 1024 * 1024);
+                uint64_t compactThreshold = 4, uint64_t sliceThreshold = 4 * 1024 * 1024,
+                uint64_t compactBaseThresholdBytes = 10 * 1024 * 1024);
 
     bool put(const std::string& key, const std::string& value);
     bool get(std::string_view key, std::string& value) const;
@@ -30,6 +31,10 @@ class DB
     Result searchTable(uint64_t tableNumber, std::string_view key, std::string& value) const;
     void compactLevel0();
     void maybeCompact();
+    void compactLevel(uint64_t n);
+    uint64_t levelBytes(uint64_t level) const;
+    uint64_t budgetFor(uint64_t n) const;
+    std::optional<uint64_t> getFirstOverLevel() const;
 
     std::unique_ptr<MemTable> activeMemTable_;
     std::filesystem::path dataDirectory_;
@@ -38,5 +43,6 @@ class DB
     std::unique_ptr<Manifest> manifest_;
     uint64_t level0CompactionThreshold_;
     uint64_t compactionSliceBytes_;
+    uint64_t compactBaseThresholdBytes_;
     mutable std::unordered_map<uint64_t, std::unique_ptr<SSTable>> tables_{};
 };
