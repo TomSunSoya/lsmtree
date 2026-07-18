@@ -14,8 +14,6 @@ namespace
 {
 using TableNumbers = std::set<uint64_t, std::greater<>>;
 
-constexpr uint64_t kEncodedRecordHeaderSize = sizeof(uint8_t) + 2 * sizeof(uint32_t);
-
 void ensureDataDirectory(const std::filesystem::path& directory)
 {
     if (!std::filesystem::exists(directory))
@@ -187,7 +185,7 @@ std::vector<std::filesystem::path> selectScanTables(const Manifest& manifest,
 DB::DB(const std::filesystem::path& dataDirectory, const uint64_t flushThreshold, const uint64_t compactThreshold,
        const uint64_t sliceThreshold, const uint64_t compactBaseThresholdBytes)
     : flushThresholdBytes_(flushThreshold), level0CompactionThreshold_(compactThreshold),
-      compactionSliceBytes_(sliceThreshold), compactBaseThresholdBytes_(compactBaseThresholdBytes)
+      compactionSliceBytes_(sliceThreshold), compactBaseThresholdBytes_(compactBaseThresholdBytes), nextSeq_(0)
 {
     ensureDataDirectory(dataDirectory);
 
@@ -201,11 +199,12 @@ DB::DB(const std::filesystem::path& dataDirectory, const uint64_t flushThreshold
     walFilePath_ = walPath(dataDirectory_, manifest_->logNumber());
     cleanupOldWALFiles(walDirectory, manifest_->logNumber());
     activeMemTable_ = std::make_unique<MemTable>(walFilePath_.string());
+    nextSeq_ = std::max(manifest_->lastSeq(), activeMemTable_->getMaxWALSeq()) + 1;
 }
 
 bool DB::put(const std::string& key, const std::string& value)
 {
-    if (!activeMemTable_->put(key, value))
+    if (!activeMemTable_->put(key, nextSeq_++, value))
         return false;
 
     try
@@ -228,7 +227,7 @@ bool DB::get(const std::string_view key, std::string& value) const
     return result == Result::VALUE;
 }
 
-bool DB::remove(const std::string& key) { return activeMemTable_->remove(key); }
+bool DB::remove(const std::string& key) { return activeMemTable_->remove(key, nextSeq_++); }
 
 void DB::flush()
 {
@@ -245,6 +244,7 @@ void DB::flush()
 
     const auto [minKey, maxKey] = SSTable::build(*activeMemTable_, tablePath);
     manifest_->addTable(tableNumber, std::filesystem::file_size(tablePath), minKey, maxKey, 0);
+    manifest_->setLastSeq(nextSeq_ - 1);
     manifest_->save();
 
     const std::filesystem::path oldWALPath = walFilePath_;

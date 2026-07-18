@@ -27,14 +27,14 @@ void expectGet(const MemTable& table, const std::string& key, const std::string&
     EXPECT_EQ(expected, actual) << "unexpected value for key: " << key;
 }
 
-void expectPut(MemTable& table, const std::string& key, const std::string& value)
+void expectPut(MemTable& table, const std::string& key, const std::string& value, const uint64_t seq = 0)
 {
-    ASSERT_TRUE(table.put(key, value)) << "expected put to succeed for key: " << key;
+    ASSERT_TRUE(table.put(key, seq, value)) << "expected put to succeed for key: " << key;
 }
 
-void expectRemove(MemTable& table, const std::string& key)
+void expectRemove(MemTable& table, const std::string& key, const uint64_t seq = 0)
 {
-    ASSERT_TRUE(table.remove(key)) << "expected remove to succeed for key: " << key;
+    ASSERT_TRUE(table.remove(key, seq)) << "expected remove to succeed for key: " << key;
 }
 
 void expectMissing(const MemTable& table, const std::string& key)
@@ -49,10 +49,12 @@ void expectTombstone(const MemTable& table, const std::string& key)
     EXPECT_EQ(Result::TOMBSTONE, table.get(key, actual)) << "expected tombstone for key: " << key;
 }
 
-void expectIteratorRecord(const Iterator& iterator, const std::string& key, const Type type, const std::string& value)
+void expectIteratorRecord(const Iterator& iterator, const std::string& key, const uint64_t seq, const Type type,
+                          const std::string& value)
 {
     ASSERT_TRUE(iterator.valid());
     EXPECT_EQ(key, iterator.current().key);
+    EXPECT_EQ(seq, iterator.current().seq);
     EXPECT_EQ(type, iterator.current().type);
     EXPECT_EQ(value, iterator.current().value);
 }
@@ -165,14 +167,14 @@ TEST(MemTableTest, RemoveHidesExistingKeyAndWritesTombstone)
     {
         MemTable table(logPath.string());
 
-        ASSERT_NO_FATAL_FAILURE(expectPut(table, "alpha", "one"));
+        ASSERT_NO_FATAL_FAILURE(expectPut(table, "alpha", "one", 10));
         ASSERT_NO_FATAL_FAILURE(expectGet(table, "alpha", "one"));
 
-        ASSERT_NO_FATAL_FAILURE(expectRemove(table, "alpha"));
+        ASSERT_NO_FATAL_FAILURE(expectRemove(table, "alpha", 11));
         expectTombstone(table, "alpha");
     }
 
-    ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, "P,5,alpha=3,one\nD,5,alpha=0,\n"));
+    ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, "P,10,5,alpha=3,one\nD,11,5,alpha=0,\n"));
 }
 
 TEST(MemTableTest, RemoveMissingKeyRecordsTombstoneAndReplaysAsMissing)
@@ -184,12 +186,12 @@ TEST(MemTableTest, RemoveMissingKeyRecordsTombstoneAndReplaysAsMissing)
         MemTable table(logPath.string());
 
         expectMissing(table, "ghost");
-        ASSERT_NO_FATAL_FAILURE(expectRemove(table, "ghost"));
+        ASSERT_NO_FATAL_FAILURE(expectRemove(table, "ghost", 7));
         expectTombstone(table, "ghost");
         EXPECT_EQ(entrySize("ghost", ""), table.size_bytes());
     }
 
-    ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, "D,5,ghost=0,\n"));
+    ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, "D,7,5,ghost=0,\n"));
 
     {
         MemTable table(logPath.string());
@@ -206,16 +208,16 @@ TEST(MemTableTest, PutAfterRemoveRestoresKeyWithNewValue)
     {
         MemTable table(logPath.string());
 
-        ASSERT_NO_FATAL_FAILURE(expectPut(table, "key", "old"));
-        ASSERT_NO_FATAL_FAILURE(expectRemove(table, "key"));
+        ASSERT_NO_FATAL_FAILURE(expectPut(table, "key", "old", 20));
+        ASSERT_NO_FATAL_FAILURE(expectRemove(table, "key", 21));
         expectTombstone(table, "key");
 
-        ASSERT_NO_FATAL_FAILURE(expectPut(table, "key", "new"));
+        ASSERT_NO_FATAL_FAILURE(expectPut(table, "key", "new", 22));
         ASSERT_NO_FATAL_FAILURE(expectGet(table, "key", "new"));
         EXPECT_EQ(entrySize("key", "new"), table.size_bytes());
     }
 
-    ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, "P,3,key=3,old\nD,3,key=0,\nP,3,key=3,new\n"));
+    ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, "P,20,3,key=3,old\nD,21,3,key=0,\nP,22,3,key=3,new\n"));
 }
 
 TEST(MemTableTest, SizeBytesTracksTombstoneAfterRemove)
@@ -238,7 +240,7 @@ TEST(MemTableTest, WALRestoresExistingRecords)
 {
     const std::filesystem::path logPath("memtable_tests_restore_existing.wal");
     const ScopedPathCleanup cleanup(logPath);
-    ASSERT_NO_FATAL_FAILURE(writeFile(logPath, "P,5,alpha=3,one\nP,4,beta=3,two\n"));
+    ASSERT_NO_FATAL_FAILURE(writeFile(logPath, "P,12,5,alpha=3,one\nP,47,4,beta=3,two\n"));
 
     {
         MemTable table(logPath.string());
@@ -246,24 +248,26 @@ TEST(MemTableTest, WALRestoresExistingRecords)
         ASSERT_NO_FATAL_FAILURE(expectGet(table, "alpha", "one"));
         ASSERT_NO_FATAL_FAILURE(expectGet(table, "beta", "two"));
         expectMissing(table, "missing");
+        EXPECT_EQ(47, table.getMaxWALSeq());
     }
 
-    ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, "P,5,alpha=3,one\nP,4,beta=3,two\n"));
+    ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, "P,12,5,alpha=3,one\nP,47,4,beta=3,two\n"));
 }
 
 TEST(MemTableTest, WALReplayKeepsLatestValueForDuplicateKey)
 {
     const std::filesystem::path logPath("memtable_tests_restore_duplicate.wal");
     const ScopedPathCleanup cleanup(logPath);
-    ASSERT_NO_FATAL_FAILURE(writeFile(logPath, "P,1,k=3,old\nP,1,k=3,new\n"));
+    ASSERT_NO_FATAL_FAILURE(writeFile(logPath, "P,1,1,k=3,old\nP,2,1,k=3,new\n"));
 
     {
         MemTable table(logPath.string());
 
         ASSERT_NO_FATAL_FAILURE(expectGet(table, "k", "new"));
+        EXPECT_EQ(2, table.getMaxWALSeq());
     }
 
-    ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, "P,1,k=3,old\nP,1,k=3,new\n"));
+    ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, "P,1,1,k=3,old\nP,2,1,k=3,new\n"));
 }
 
 TEST(MemTableTest, WALReplayKeepsTombstoneForDeletedKey)
@@ -274,8 +278,8 @@ TEST(MemTableTest, WALReplayKeepsTombstoneForDeletedKey)
     {
         MemTable table(logPath.string());
 
-        ASSERT_NO_FATAL_FAILURE(expectPut(table, "k", "old"));
-        ASSERT_NO_FATAL_FAILURE(expectRemove(table, "k"));
+        ASSERT_NO_FATAL_FAILURE(expectPut(table, "k", "old", 3));
+        ASSERT_NO_FATAL_FAILURE(expectRemove(table, "k", 4));
         expectTombstone(table, "k");
     }
 
@@ -285,14 +289,14 @@ TEST(MemTableTest, WALReplayKeepsTombstoneForDeletedKey)
         expectTombstone(table, "k");
     }
 
-    ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, "P,1,k=3,old\nD,1,k=0,\n"));
+    ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, "P,3,1,k=3,old\nD,4,1,k=0,\n"));
 }
 
 TEST(MemTableTest, WALTruncatesIncompleteTailDuringRestore)
 {
     const std::filesystem::path logPath("memtable_tests_restore_truncate_tail.wal");
     const ScopedPathCleanup cleanup(logPath);
-    ASSERT_NO_FATAL_FAILURE(writeFile(logPath, "P,5,alpha=3,one\nP,4,beta=3"));
+    ASSERT_NO_FATAL_FAILURE(writeFile(logPath, "P,5,5,alpha=3,one\nP,6,4,beta=3"));
 
     {
         MemTable table(logPath.string());
@@ -301,21 +305,21 @@ TEST(MemTableTest, WALTruncatesIncompleteTailDuringRestore)
         expectMissing(table, "beta");
     }
 
-    ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, "P,5,alpha=3,one\n"));
+    ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, "P,5,5,alpha=3,one\n"));
 }
 
 TEST(MemTableTest, WALCanAppendAfterTruncatingDamagedTailAndRestoreAgain)
 {
     const std::filesystem::path logPath("memtable_tests_restore_append_after_truncate.wal");
     const ScopedPathCleanup cleanup(logPath);
-    ASSERT_NO_FATAL_FAILURE(writeFile(logPath, "P,5,alpha=3,one\nP,4,beta=3"));
+    ASSERT_NO_FATAL_FAILURE(writeFile(logPath, "P,5,5,alpha=3,one\nP,6,4,beta=3"));
 
     {
         MemTable table(logPath.string());
 
         ASSERT_NO_FATAL_FAILURE(expectGet(table, "alpha", "one"));
         expectMissing(table, "beta");
-        ASSERT_NO_FATAL_FAILURE(expectPut(table, "gamma", "three"));
+        ASSERT_NO_FATAL_FAILURE(expectPut(table, "gamma", "three", 7));
         ASSERT_NO_FATAL_FAILURE(expectGet(table, "gamma", "three"));
     }
 
@@ -327,14 +331,14 @@ TEST(MemTableTest, WALCanAppendAfterTruncatingDamagedTailAndRestoreAgain)
         expectMissing(table, "beta");
     }
 
-    ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, "P,5,alpha=3,one\nP,5,gamma=5,three\n"));
+    ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, "P,5,5,alpha=3,one\nP,7,5,gamma=5,three\n"));
 }
 
 TEST(MemTableTest, WALTreatsOverflowLengthAsDamagedTail)
 {
     const std::filesystem::path logPath("memtable_tests_restore_overflow_length.wal");
     const ScopedPathCleanup cleanup(logPath);
-    ASSERT_NO_FATAL_FAILURE(writeFile(logPath, "P,5,alpha=3,one\nP,99999999999999999999999,bad=1,x\n"));
+    ASSERT_NO_FATAL_FAILURE(writeFile(logPath, "P,5,5,alpha=3,one\nP,99999999999999999999999,3,bad=1,x\n"));
 
     {
         MemTable table(logPath.string());
@@ -343,7 +347,7 @@ TEST(MemTableTest, WALTreatsOverflowLengthAsDamagedTail)
         expectMissing(table, "bad");
     }
 
-    ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, "P,5,alpha=3,one\n"));
+    ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, "P,5,5,alpha=3,one\n"));
 }
 
 TEST(MemTableTest, WALAppendFormat)
@@ -355,20 +359,20 @@ TEST(MemTableTest, WALAppendFormat)
         MemTable table(logPath.string());
         std::string expected;
 
-        ASSERT_NO_FATAL_FAILURE(expectPut(table, "alpha", "one"));
-        expected += "P,5,alpha=3,one\n";
+        ASSERT_NO_FATAL_FAILURE(expectPut(table, "alpha", "one", 41));
+        expected += "P,41,5,alpha=3,one\n";
         ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, expected));
 
-        ASSERT_NO_FATAL_FAILURE(expectPut(table, "beta", "two"));
-        expected += "P,4,beta=3,two\n";
+        ASSERT_NO_FATAL_FAILURE(expectPut(table, "beta", "two", 42));
+        expected += "P,42,4,beta=3,two\n";
         ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, expected));
 
-        ASSERT_NO_FATAL_FAILURE(expectPut(table, "a,b=c", "v=1,ok"));
-        expected += "P,5,a,b=c=6,v=1,ok\n";
+        ASSERT_NO_FATAL_FAILURE(expectPut(table, "a,b=c", "v=1,ok", 43));
+        expected += "P,43,5,a,b=c=6,v=1,ok\n";
         ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, expected));
 
-        ASSERT_NO_FATAL_FAILURE(expectPut(table, "a", "vvv\n\n\rvvv"));
-        expected += "P,1,a=9,vvv\n\n\rvvv\n";
+        ASSERT_NO_FATAL_FAILURE(expectPut(table, "a", "vvv\n\n\rvvv", 44));
+        expected += "P,44,1,a=9,vvv\n\n\rvvv\n";
         ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, expected));
     }
 }
@@ -381,15 +385,15 @@ TEST(MemTableTest, WALAppendsToExistingLog)
     {
         std::ofstream seed(logPath, std::ios::binary);
         ASSERT_TRUE(seed.is_open()) << "expected seed WAL to open";
-        seed << "P,4,seed=5,value\n";
+        seed << "P,98,4,seed=5,value\n";
     }
 
     {
         MemTable table(logPath.string());
-        ASSERT_NO_FATAL_FAILURE(expectPut(table, "next", "record"));
+        ASSERT_NO_FATAL_FAILURE(expectPut(table, "next", "record", 99));
     }
 
-    ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, "P,4,seed=5,value\nP,4,next=6,record\n"));
+    ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, "P,98,4,seed=5,value\nP,99,4,next=6,record\n"));
 }
 
 TEST(MemTableTest, WALCreatesParentDirectories)
@@ -400,10 +404,10 @@ TEST(MemTableTest, WALCreatesParentDirectories)
 
     {
         MemTable table(logPath.string());
-        ASSERT_NO_FATAL_FAILURE(expectPut(table, "parent", "created"));
+        ASSERT_NO_FATAL_FAILURE(expectPut(table, "parent", "created", 7));
 
         EXPECT_TRUE(std::filesystem::exists(logPath)) << "expected WAL file in nested directory";
-        ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, "P,6,parent=7,created\n"));
+        ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, "P,7,6,parent=7,created\n"));
     }
 }
 
@@ -416,18 +420,18 @@ TEST(MemTableTest, WALRecordsEmptyAndMultiDigitLengths)
         MemTable table(logPath.string());
         std::string expected;
 
-        ASSERT_NO_FATAL_FAILURE(expectPut(table, "empty-value", ""));
-        expected += "P,11,empty-value=0,\n";
+        ASSERT_NO_FATAL_FAILURE(expectPut(table, "empty-value", "", 8));
+        expected += "P,8,11,empty-value=0,\n";
         ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, expected));
         ASSERT_NO_FATAL_FAILURE(expectGet(table, "empty-value", ""));
 
-        ASSERT_NO_FATAL_FAILURE(expectPut(table, "tenletters", "0123456789abc"));
-        expected += "P,10,tenletters=13,0123456789abc\n";
+        ASSERT_NO_FATAL_FAILURE(expectPut(table, "tenletters", "0123456789abc", 9));
+        expected += "P,9,10,tenletters=13,0123456789abc\n";
         ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, expected));
         ASSERT_NO_FATAL_FAILURE(expectGet(table, "tenletters", "0123456789abc"));
 
-        ASSERT_NO_FATAL_FAILURE(expectPut(table, "", ""));
-        expected += "P,0,=0,\n";
+        ASSERT_NO_FATAL_FAILURE(expectPut(table, "", "", 10));
+        expected += "P,10,0,=0,\n";
         ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, expected));
         ASSERT_NO_FATAL_FAILURE(expectGet(table, "", ""));
     }
@@ -453,19 +457,19 @@ TEST(MemTableTest, IteratorTraversesSortedValuesAndTombstonesThroughBaseInterfac
 
     {
         MemTable table(logPath.string());
-        ASSERT_NO_FATAL_FAILURE(expectPut(table, "gamma", "three"));
-        ASSERT_NO_FATAL_FAILURE(expectPut(table, "alpha", "one"));
-        ASSERT_NO_FATAL_FAILURE(expectPut(table, "beta", "two"));
-        ASSERT_NO_FATAL_FAILURE(expectRemove(table, "beta"));
+        ASSERT_NO_FATAL_FAILURE(expectPut(table, "gamma", "three", 30));
+        ASSERT_NO_FATAL_FAILURE(expectPut(table, "alpha", "one", 10));
+        ASSERT_NO_FATAL_FAILURE(expectPut(table, "beta", "two", 20));
+        ASSERT_NO_FATAL_FAILURE(expectRemove(table, "beta", 40));
 
         MemTableIterator concreteIterator(table);
         Iterator& iterator = concreteIterator;
 
-        ASSERT_NO_FATAL_FAILURE(expectIteratorRecord(iterator, "alpha", Type::VALUE, "one"));
+        ASSERT_NO_FATAL_FAILURE(expectIteratorRecord(iterator, "alpha", 10, Type::VALUE, "one"));
         iterator.advance();
-        ASSERT_NO_FATAL_FAILURE(expectIteratorRecord(iterator, "beta", Type::TOMBSTONE, ""));
+        ASSERT_NO_FATAL_FAILURE(expectIteratorRecord(iterator, "beta", 40, Type::TOMBSTONE, ""));
         iterator.advance();
-        ASSERT_NO_FATAL_FAILURE(expectIteratorRecord(iterator, "gamma", Type::VALUE, "three"));
+        ASSERT_NO_FATAL_FAILURE(expectIteratorRecord(iterator, "gamma", 30, Type::VALUE, "three"));
         iterator.advance();
         EXPECT_FALSE(iterator.valid());
     }

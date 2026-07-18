@@ -12,8 +12,6 @@
 
 namespace
 {
-constexpr uint64_t kEncodedRecordHeaderSize = sizeof(uint8_t) + 2 * sizeof(uint32_t);
-
 struct MergeItem
 {
     std::string key;
@@ -157,9 +155,11 @@ uint64_t FileWriter::add(const Record& record)
 {
     const uint32_t keySize = record.key.size();
     const uint32_t valueSize = record.value.size();
+    const uint64_t seq = record.seq;
     const auto type = static_cast<uint8_t>(record.type);
 
     writeAll(dataFile_.get(), &type, sizeof(type));
+    writeAll(dataFile_.get(), &seq, sizeof(seq));
     writeAll(dataFile_.get(), &keySize, sizeof(keySize));
     writeAll(dataFile_.get(), &valueSize, sizeof(valueSize));
     writeAll(dataFile_.get(), record.key.data(), keySize);

@@ -47,4 +47,5 @@ class DB
     uint64_t compactBaseThresholdBytes_;
     std::unordered_map<uint64_t, std::string> cursors_;
     mutable std::unordered_map<uint64_t, std::unique_ptr<SSTable>> tables_{};
+    uint64_t nextSeq_{};
 };

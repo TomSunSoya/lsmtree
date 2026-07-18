@@ -1,7 +1,6 @@
 #include "MemTable.h"
 
 #include <cassert>
-#include <cctype>
 #include <cerrno>
 #include <fcntl.h>
 #include <fstream>
@@ -13,10 +12,11 @@
 
 namespace
 {
-std::string encodeWALRecord(const std::string& key, const std::string& value, const Type type)
+std::string encodeWALRecord(const std::string& key, const uint64_t seq, const std::string& value, const Type type)
 {
     const std::string operation = type == Type::VALUE ? "P," : "D,";
-    return operation + std::to_string(key.size()) + "," + key + "=" + std::to_string(value.size()) + "," + value + "\n";
+    return operation + std::to_string(seq) + "," + std::to_string(key.size()) + "," + key + "=" +
+           std::to_string(value.size()) + "," + value + "\n";
 }
 
 class WALParser
@@ -37,6 +37,10 @@ class WALParser
             if (operation != "D" && operation != "P")
                 return records;
 
+            uint64_t seq = 0;
+            if (!readLength(seq) || !consume(','))
+                return records;
+
             std::string_view key;
             if (!readLengthPrefixedField(key, '='))
                 return records;
@@ -46,7 +50,7 @@ class WALParser
                 return records;
 
             const Type type = operation == "P" ? Type::VALUE : Type::TOMBSTONE;
-            records.emplace_back(std::string(key), Entry{type, std::string(value)});
+            records.emplace_back(std::string(key), Entry{type, seq, std::string(value)});
         }
 
         lastGoodOffset = position_;
@@ -54,7 +58,7 @@ class WALParser
     }
 
   private:
-    bool readLength(size_t& length)
+    bool readLength(uint64_t& length)
     {
         const size_t begin = position_;
         while (position_ < content_.size() && std::isdigit(static_cast<unsigned char>(content_[position_])))
@@ -95,7 +99,7 @@ class WALParser
 
     bool readLengthPrefixedField(std::string_view& field, const char terminator)
     {
-        size_t length = 0;
+        uint64_t length = 0;
         return readLength(length) && consume(',') && readField(length, field) && consume(terminator);
     }
 
@@ -105,15 +109,15 @@ class WALParser
 } // namespace
 
 MemTable::MemTable(const std::string_view logFilePath)
-    : logPath_(logFilePath), walWriter_(logFilePath), currentSizeBytes_(0)
+    : logPath_(logFilePath), walWriter_(logFilePath), currentSizeBytes_(0), currentSeq_(0)
 {
     if (!restoreFromWAL())
         throw std::runtime_error("Failed to restore from wal");
 }
 
-bool MemTable::put(const std::string& key, const std::string& value)
+bool MemTable::put(const std::string& key, const uint64_t seq, const std::string& value)
 {
-    if (!appendToWAL(key, value, Type::VALUE))
+    if (!appendToWAL(key, seq, value, Type::VALUE))
         return false;
 
     if (const auto existing = table_.find(key); existing != table_.end())
@@ -124,7 +128,7 @@ bool MemTable::put(const std::string& key, const std::string& value)
         currentSizeBytes_ -= sizeof(Type);
     }
 
-    table_[key] = {Type::VALUE, value};
+    table_[key] = {Type::VALUE, seq, value};
     currentSizeBytes_ += value.size();
     currentSizeBytes_ += key.size();
     currentSizeBytes_ += sizeof(Type);
@@ -143,20 +147,21 @@ Result MemTable::get(const std::string_view key, std::string& value) const
     return Result::VALUE;
 }
 
-bool MemTable::remove(const std::string& key)
+bool MemTable::remove(const std::string& key, const uint64_t seq)
 {
-    if (!appendToWAL(key, "", Type::TOMBSTONE))
+    if (!appendToWAL(key, seq, "", Type::TOMBSTONE))
         return false;
 
     if (const auto existing = table_.find(key); existing != table_.end())
     {
         existing->second.type = Type::TOMBSTONE;
         currentSizeBytes_ -= existing->second.value.size();
+        existing->second.seq = seq;
         existing->second.value.clear();
     }
     else
     {
-        table_[key] = {Type::TOMBSTONE, ""};
+        table_[key] = {Type::TOMBSTONE, seq, ""};
         currentSizeBytes_ += sizeof(Type);
         currentSizeBytes_ += key.size();
     }
@@ -166,6 +171,8 @@ bool MemTable::remove(const std::string& key)
 size_t MemTable::size() const { return table_.size(); }
 
 size_t MemTable::size_bytes() const { return currentSizeBytes_; }
+
+uint64_t MemTable::getMaxWALSeq() const { return currentSeq_; }
 
 MemTable::WALFileWriter::WALFileWriter(const std::string_view logPath) : path_(logPath)
 {
@@ -215,11 +222,11 @@ int MemTable::WALFileWriter::truncate(const size_t offset)
     return errno;
 }
 
-bool MemTable::appendToWAL(const std::string& key, const std::string& value, const Type type)
+bool MemTable::appendToWAL(const std::string& key, const uint64_t seq, const std::string& value, const Type type)
 {
     try
     {
-        walWriter_.write(encodeWALRecord(key, value, type));
+        walWriter_.write(encodeWALRecord(key, seq, value, type));
         return true;
     }
     catch (const std::system_error& error)
@@ -241,7 +248,10 @@ bool MemTable::restoreFromWAL()
 
     size_t lastGoodOffset = 0;
     for (const auto& [key, entry] : parseWALRecords(content, lastGoodOffset))
+    {
         table_[key] = entry;
+        currentSeq_ = std::max(entry.seq, currentSeq_);
+    }
 
     if (lastGoodOffset == content.size())
         return true;
@@ -290,6 +300,7 @@ void MemTableIterator::refreshCurrentRecord()
 
     currentRecord_ = Record{
         currentIterator_->first,
+        currentIterator_->second.seq,
         currentIterator_->second.type,
         currentIterator_->second.value,
     };

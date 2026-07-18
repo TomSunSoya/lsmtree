@@ -1,1 +1,1 @@
-# leveled 补成 N 层:每层字节预算(基数可配、逐层 ×10),某层超预算就把它往下压。设计先行,答两问再动手:(1) Ln→Ln+1 为什么只挑一个表下沉,而 L0→L1 却要全层端走——两个"为什么"是同一个原理的两面;(2) 挑哪一个表(轮转游标),游标状态放哪、要不要持久化。读路径/scan/manifest 已是 N 层就绪,只动 compact 编排和触发。(MVCC 排在这之后,地图已画好:seq 进格式 → memtable 多版本 → 快照读 → compaction 保留规则)
+# MVCC 第二刀:memtable 多版本——map 的键从 key 变成 (key, seq),key 升序、同 key 内 seq 降序;put/remove 不再覆盖而是插入新版本;get 变成"该 key 下 seq 最大的那条";MemTableIterator 吐出全部版本(含同 key 多条)。想清楚再动手:排序比较器怎么写、size_bytes 怎么算(多版本都占内存)、flush 时同 key 多版本要不要全部写进 SSTable(提示:要——丢版本是 compaction 的事,而且要等快照规则,现在谁都不能丢)。

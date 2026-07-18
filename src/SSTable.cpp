@@ -3,8 +3,6 @@
 #include <algorithm>
 #include <array>
 #include <cassert>
-#include <cstdint>
-#include <cstring>
 #include <iterator>
 #include <stdexcept>
 #include <utility>
@@ -13,7 +11,6 @@
 
 namespace
 {
-constexpr uint64_t kRecordHeaderSize = sizeof(char) + 2 * sizeof(uint32_t);
 constexpr uint64_t kIndexMetadataSize = sizeof(uint32_t) + sizeof(uint64_t);
 constexpr size_t kFooterSize = 3 * sizeof(uint64_t);
 
@@ -28,8 +25,8 @@ Footer readFooter(std::ifstream& input)
 {
     input.seekg(-static_cast<std::streamoff>(kFooterSize), std::ios::end);
 
-    std::array<std::byte, kFooterSize> buffer;
-    input.read(reinterpret_cast<char*>(buffer.data()), static_cast<std::streamsize>(buffer.size()));
+    std::array<std::byte, kFooterSize> buffer{};
+    input.read(reinterpret_cast<char*>(buffer.data()), buffer.size());
 
     Footer footer{};
     std::memcpy(&footer.recordsSize, buffer.data(), sizeof(footer.recordsSize));
@@ -43,6 +40,10 @@ std::optional<Record> readRecord(std::ifstream& input)
 {
     char type = 0;
     if (!input.read(&type, sizeof(type)))
+        return std::nullopt;
+
+    uint64_t seq = 0;
+    if (!input.read(reinterpret_cast<char*>(&seq), sizeof(seq)))
         return std::nullopt;
 
     uint32_t keySize = 0;
@@ -59,7 +60,7 @@ std::optional<Record> readRecord(std::ifstream& input)
     if (!input.read(value.data(), valueSize))
         return std::nullopt;
 
-    return Record{std::move(key), static_cast<Type>(type), std::move(value)};
+    return Record{std::move(key), seq, static_cast<Type>(type), std::move(value)};
 }
 
 std::optional<Index> readIndex(std::ifstream& input)
@@ -83,7 +84,7 @@ uint64_t serializedRecordSize(const std::optional<Record>& record)
 {
     if (!record)
         return 0;
-    return kRecordHeaderSize + record->key.size() + record->value.size();
+    return kEncodedRecordHeaderSize + record->key.size() + record->value.size();
 }
 
 uint64_t serializedIndexSize(const Index& index) { return kIndexMetadataSize + index.key.size(); }
@@ -112,7 +113,7 @@ std::pair<std::string, std::string> SSTable::build(const MemTable& memTable, con
     std::vector<Record> records;
     records.reserve(memTable.size());
     for (const auto& [key, entry] : memTable)
-        records.emplace_back(key, entry.type, entry.value);
+        records.emplace_back(key, entry.seq, entry.type, entry.value);
 
     addRecordToFile(records, path);
     return {records.front().key, records.back().key};
@@ -243,7 +244,7 @@ uint64_t SSTable::addRecordToFile(const std::span<Record> records, const std::fi
     std::vector<Index> indices;
     uint64_t recordsSize = 0;
     uint64_t currentBlockSize = 0;
-    for (const auto& [key, type, value] : records)
+    for (const auto& [key, seq, type, value] : records)
     {
         if (recordsSize == 0 || currentBlockSize > kBlockSize)
         {
@@ -251,7 +252,7 @@ uint64_t SSTable::addRecordToFile(const std::span<Record> records, const std::fi
             indices.emplace_back(key.size(), key, recordsSize);
         }
 
-        const uint64_t bytesWritten = writer.add({key, type, value});
+        const uint64_t bytesWritten = writer.add({key, seq, type, value});
         recordsSize += bytesWritten;
         currentBlockSize += bytesWritten;
         bloomFilter.add(key);

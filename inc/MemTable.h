@@ -16,9 +16,9 @@ class MemTable
   public:
     explicit MemTable(std::string_view logFilePath);
 
-    bool put(const std::string& key, const std::string& value);
+    bool put(const std::string& key, uint64_t seq, const std::string& value);
     Result get(std::string_view key, std::string& value) const;
-    bool remove(const std::string& key);
+    bool remove(const std::string& key, uint64_t seq);
 
     [[nodiscard]] size_t size() const;
     [[nodiscard]] size_t size_bytes() const;
@@ -28,6 +28,8 @@ class MemTable
     [[nodiscard]] const_iterator begin() const noexcept { return table_.begin(); }
 
     [[nodiscard]] const_iterator end() const noexcept { return table_.end(); }
+
+    uint64_t getMaxWALSeq() const;
 
   private:
     struct WALFileWriter
@@ -48,7 +50,7 @@ class MemTable
 
     friend class MemTableIterator;
 
-    bool appendToWAL(const std::string& key, const std::string& value, Type type);
+    bool appendToWAL(const std::string& key, uint64_t seq, const std::string& value, Type type);
     bool restoreFromWAL();
     static std::vector<std::pair<std::string, Entry>> parseWALRecords(std::string_view content, size_t& lastGoodOffset);
 
@@ -56,6 +58,7 @@ class MemTable
     const std::filesystem::path logPath_;
     WALFileWriter walWriter_;
     size_t currentSizeBytes_;
+    uint64_t currentSeq_;
 };
 
 class MemTableIterator : public Iterator

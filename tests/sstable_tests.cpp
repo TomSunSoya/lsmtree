@@ -27,9 +27,9 @@ std::string multiBlockKey(const size_t index)
     return "key-" + std::string(index < 10 ? "0" : "") + std::to_string(index);
 }
 
-void expectPut(MemTable& table, const std::string& key, const std::string& value)
+void expectPut(MemTable& table, const std::string& key, const std::string& value, const uint64_t seq = 0)
 {
-    ASSERT_TRUE(table.put(key, value)) << "expected put to succeed for key: " << key;
+    ASSERT_TRUE(table.put(key, seq, value)) << "expected put to succeed for key: " << key;
 }
 
 void expectGet(const SSTable& table, const std::string& key, const std::string& expected)
@@ -65,9 +65,11 @@ std::string hexDump(std::string_view content)
     return out.str();
 }
 
-void expectRecord(const Record& record, const std::string& key, const Type type, const std::string& value)
+void expectRecord(const Record& record, const std::string& key, const uint64_t seq, const Type type,
+                  const std::string& value)
 {
     EXPECT_EQ(key, record.key);
+    EXPECT_EQ(seq, record.seq);
     EXPECT_EQ(type, record.type);
     EXPECT_EQ(value, record.value);
 }
@@ -106,7 +108,7 @@ TEST(SSTableTest, BuildPersistsTombstoneAndKeepsScanningUnrelatedKeys)
         MemTable memTable(walPath.string());
         ASSERT_NO_FATAL_FAILURE(expectPut(memTable, "alpha", "one"));
         ASSERT_NO_FATAL_FAILURE(expectPut(memTable, "beta", "two"));
-        ASSERT_TRUE(memTable.remove("alpha"));
+        ASSERT_TRUE(memTable.remove("alpha", 30));
 
         ASSERT_NO_THROW(SSTable::build(memTable, sstablePath));
     }
@@ -129,7 +131,7 @@ TEST(SSTableTest, BuildReturnsMinAndMaxKeysIncludingTombstones)
         MemTable memTable((root / "wal_0.wal").string());
         ASSERT_NO_FATAL_FAILURE(expectPut(memTable, "middle", "value"));
         ASSERT_NO_FATAL_FAILURE(expectPut(memTable, "zulu", "last"));
-        ASSERT_TRUE(memTable.remove("alpha"));
+        ASSERT_TRUE(memTable.remove("alpha", 30));
 
         ASSERT_NO_THROW(keyRange = SSTable::build(memTable, sstablePath));
     }
@@ -151,8 +153,8 @@ TEST(SSTableTest, IteratorTraversesRecordsInTableOrderThroughBaseInterface)
 
     {
         MemTable memTable(walPath.string());
-        ASSERT_NO_FATAL_FAILURE(expectPut(memTable, "beta", "two"));
-        ASSERT_NO_FATAL_FAILURE(expectPut(memTable, "alpha", "one"));
+        ASSERT_NO_FATAL_FAILURE(expectPut(memTable, "beta", "two", 22));
+        ASSERT_NO_FATAL_FAILURE(expectPut(memTable, "alpha", "one", 11));
 
         ASSERT_NO_THROW(SSTable::build(memTable, sstablePath));
     }
@@ -160,11 +162,11 @@ TEST(SSTableTest, IteratorTraversesRecordsInTableOrderThroughBaseInterface)
     SSTableIterator concreteIterator(sstablePath);
     Iterator& iterator = concreteIterator;
     ASSERT_TRUE(iterator.valid());
-    ASSERT_NO_FATAL_FAILURE(expectRecord(iterator.current(), "alpha", Type::VALUE, "one"));
+    ASSERT_NO_FATAL_FAILURE(expectRecord(iterator.current(), "alpha", 11, Type::VALUE, "one"));
 
     iterator.advance();
     ASSERT_TRUE(iterator.valid());
-    ASSERT_NO_FATAL_FAILURE(expectRecord(iterator.current(), "beta", Type::VALUE, "two"));
+    ASSERT_NO_FATAL_FAILURE(expectRecord(iterator.current(), "beta", 22, Type::VALUE, "two"));
 
     iterator.advance();
     EXPECT_FALSE(iterator.valid());
@@ -178,20 +180,20 @@ TEST(SSTableTest, IteratorExposesTombstoneRecords)
 
     {
         MemTable memTable(walPath.string());
-        ASSERT_NO_FATAL_FAILURE(expectPut(memTable, "alpha", "one"));
-        ASSERT_NO_FATAL_FAILURE(expectPut(memTable, "beta", "two"));
-        ASSERT_TRUE(memTable.remove("alpha"));
+        ASSERT_NO_FATAL_FAILURE(expectPut(memTable, "alpha", "one", 10));
+        ASSERT_NO_FATAL_FAILURE(expectPut(memTable, "beta", "two", 20));
+        ASSERT_TRUE(memTable.remove("alpha", 30));
 
         ASSERT_NO_THROW(SSTable::build(memTable, sstablePath));
     }
 
     SSTableIterator cursor(sstablePath);
     ASSERT_TRUE(cursor.valid());
-    ASSERT_NO_FATAL_FAILURE(expectRecord(cursor.current(), "alpha", Type::TOMBSTONE, ""));
+    ASSERT_NO_FATAL_FAILURE(expectRecord(cursor.current(), "alpha", 30, Type::TOMBSTONE, ""));
 
     cursor.advance();
     ASSERT_TRUE(cursor.valid());
-    ASSERT_NO_FATAL_FAILURE(expectRecord(cursor.current(), "beta", Type::VALUE, "two"));
+    ASSERT_NO_FATAL_FAILURE(expectRecord(cursor.current(), "beta", 20, Type::VALUE, "two"));
 
     cursor.advance();
     EXPECT_FALSE(cursor.valid());
@@ -226,12 +228,12 @@ TEST(SSTableTest, BuildWritesExpectedLittleEndianRecordPrefix)
     const std::filesystem::path walPath("sstable_tests_exact_bytes.wal");
     const std::filesystem::path sstablePath("sstable_tests_exact_bytes.sst");
     const ScopedPathCleanup cleanup({walPath, sstablePath});
-    constexpr size_t expectedRecordsSize = 25;
+    constexpr size_t expectedRecordsSize = 41;
 
     {
         MemTable memTable(walPath.string());
-        ASSERT_NO_FATAL_FAILURE(expectPut(memTable, "long", ""));
-        ASSERT_NO_FATAL_FAILURE(expectPut(memTable, "a", "xy"));
+        ASSERT_NO_FATAL_FAILURE(expectPut(memTable, "long", "", 0x1112131415161718ULL));
+        ASSERT_NO_FATAL_FAILURE(expectPut(memTable, "a", "xy", 0x0102030405060708ULL));
 
         ASSERT_NO_THROW(SSTable::build(memTable, sstablePath));
     }
@@ -240,8 +242,8 @@ TEST(SSTableTest, BuildWritesExpectedLittleEndianRecordPrefix)
     ASSERT_NO_FATAL_FAILURE(readFile(sstablePath, content));
 
     ASSERT_GE(content.size(), expectedRecordsSize);
-    EXPECT_EQ("00 01 00 00 00 02 00 00 00 61 78 79 "
-              "00 04 00 00 00 00 00 00 00 6c 6f 6e 67",
+    EXPECT_EQ("00 08 07 06 05 04 03 02 01 01 00 00 00 02 00 00 00 61 78 79 "
+              "00 18 17 16 15 14 13 12 11 04 00 00 00 00 00 00 00 6c 6f 6e 67",
               hexDump(std::string_view(content).substr(0, expectedRecordsSize)));
 }
 
@@ -352,10 +354,10 @@ TEST(SSTableTest, AddRecordToFileWritesOnlyRequestedSpan)
     std::filesystem::create_directories(root);
     const std::filesystem::path sstablePath = root / "sst_0.sst";
     std::vector<Record> records{
-        {"alpha", Type::VALUE, "one"},
-        {"beta", Type::TOMBSTONE, ""},
-        {"gamma", Type::VALUE, "three"},
-        {"zulu", Type::VALUE, "last"},
+        {"alpha", 1, Type::VALUE, "one"},
+        {"beta", 2, Type::TOMBSTONE, ""},
+        {"gamma", 3, Type::VALUE, "three"},
+        {"zulu", 4, Type::VALUE, "last"},
     };
 
     ASSERT_NO_THROW(SSTable::addRecordToFile(std::span(records).subspan(1, 2), sstablePath));
@@ -368,10 +370,10 @@ TEST(SSTableTest, AddRecordToFileWritesOnlyRequestedSpan)
 
     SSTableIterator cursor(sstablePath);
     ASSERT_TRUE(cursor.valid());
-    ASSERT_NO_FATAL_FAILURE(expectRecord(cursor.current(), "beta", Type::TOMBSTONE, ""));
+    ASSERT_NO_FATAL_FAILURE(expectRecord(cursor.current(), "beta", 2, Type::TOMBSTONE, ""));
     cursor.advance();
     ASSERT_TRUE(cursor.valid());
-    ASSERT_NO_FATAL_FAILURE(expectRecord(cursor.current(), "gamma", Type::VALUE, "three"));
+    ASSERT_NO_FATAL_FAILURE(expectRecord(cursor.current(), "gamma", 3, Type::VALUE, "three"));
     cursor.advance();
     EXPECT_FALSE(cursor.valid());
 }
@@ -383,8 +385,8 @@ TEST(SSTableTest, AddRecordToFileReturnsPublishedFileSize)
     ASSERT_TRUE(std::filesystem::create_directories(root));
     const std::filesystem::path sstablePath = root / "sst_0.sst";
     std::vector<Record> records{
-        {"alpha", Type::VALUE, "one"},
-        {"beta", Type::TOMBSTONE, ""},
+        {"alpha", 1, Type::VALUE, "one"},
+        {"beta", 2, Type::TOMBSTONE, ""},
     };
 
     uint64_t reportedSize = 0;
@@ -486,7 +488,7 @@ TEST(SSTableTest, SparseIndexLocatesKeysAcrossMultipleBlocks)
     const std::filesystem::path sstablePath = root / "table.sst";
     constexpr size_t entryCount = 12;
     constexpr size_t valueSize = 1'500;
-    constexpr uint64_t recordSize = 9 + 6 + valueSize;
+    constexpr uint64_t recordSize = kEncodedRecordHeaderSize + 6 + valueSize;
     std::filesystem::create_directories(root);
 
     {
@@ -610,7 +612,7 @@ TEST(SSTableTest, SparseIndexPreservesTombstoneInLaterBlock)
         MemTable memTable(walPath.string());
         for (size_t i = 0; i < entryCount; ++i)
             ASSERT_NO_FATAL_FAILURE(expectPut(memTable, multiBlockKey(i), std::string(valueSize, 'a' + i)));
-        ASSERT_TRUE(memTable.remove(multiBlockKey(7)));
+        ASSERT_TRUE(memTable.remove(multiBlockKey(7), 99));
 
         ASSERT_NO_THROW(SSTable::build(memTable, sstablePath));
     }
@@ -645,7 +647,7 @@ TEST(SSTableTest, SparseIndexStopsAtDeclaredSizeBeforeFooter)
     ASSERT_TRUE(in.read(reinterpret_cast<char*>(&recordsSize), sizeof(recordsSize)));
     ASSERT_TRUE(in.read(reinterpret_cast<char*>(&bloomSize), sizeof(bloomSize)));
     ASSERT_TRUE(in.read(reinterpret_cast<char*>(&indexSize), sizeof(indexSize)));
-    EXPECT_EQ(12, recordsSize);
+    EXPECT_EQ(kEncodedRecordHeaderSize + 3, recordsSize);
     EXPECT_GT(bloomSize, 0);
     EXPECT_EQ(sizeof(uint32_t) + 3 + sizeof(uint64_t), indexSize);
 

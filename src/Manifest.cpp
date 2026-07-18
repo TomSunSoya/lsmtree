@@ -56,6 +56,7 @@ void writeKey(const FileWriter& writer, const std::string& key)
 //   uint64_t log_number
 //   uint8_t  version
 //   uint64_t next_table_number
+//   uint64_t lastSeq
 //   repeated level_count times:
 //     uint64_t table_count
 //     repeated table_count times:
@@ -80,6 +81,7 @@ Manifest::Manifest(std::filesystem::path path) : path_(std::move(path))
     if (formatVersion != kManifestFormatVersion)
         throw std::runtime_error("Unsupported manifest version!");
     readValue(input, nextTableNumber_, "failed to read next");
+    readValue(input, lastSeq_, "failed to read last seq");
 
     levels_.resize(levelCount);
     for (auto& level : levels_)
@@ -95,6 +97,10 @@ Manifest::Manifest(std::filesystem::path path) : path_(std::move(path))
 uint64_t Manifest::nextNumber() const { return nextTableNumber_; }
 
 uint64_t Manifest::allocateNumber() { return nextTableNumber_++; }
+
+uint64_t Manifest::lastSeq() const { return lastSeq_; }
+
+void Manifest::setLastSeq(const uint64_t lastSeq) { lastSeq_ = lastSeq; }
 
 void Manifest::addTable(uint64_t number, uint64_t size, std::string_view minKey, std::string_view maxKey,
                         uint32_t targetLevel)
@@ -146,6 +152,7 @@ void Manifest::save() const
     writeValue(writer, logNumber_);
     writeValue(writer, kManifestFormatVersion);
     writeValue(writer, nextTableNumber_);
+    writeValue(writer, lastSeq_);
 
     for (const auto& level : levels_)
     {

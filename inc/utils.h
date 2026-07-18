@@ -17,6 +17,7 @@ enum class Type : uint8_t
 struct Entry
 {
     Type type;
+    uint64_t seq;
     std::string value;
 };
 
@@ -30,6 +31,7 @@ enum class Result
 struct Record
 {
     std::string key;
+    uint64_t seq;
     Type type;
     std::string value;
 };
@@ -111,3 +113,6 @@ class Iterator
 };
 
 std::vector<Record> mergeSorted(std::vector<std::unique_ptr<Iterator>>& sources);
+
+// type(1) + seq(8) + keySize(4) + valueSize(4)
+constexpr uint64_t kEncodedRecordHeaderSize = sizeof(uint8_t) + 2 * sizeof(uint32_t) + sizeof(uint64_t);

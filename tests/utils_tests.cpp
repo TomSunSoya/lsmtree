@@ -35,9 +35,12 @@ class VectorIterator final : public Iterator
     size_t position = 0;
 };
 
-Record value(std::string key, std::string content) { return {std::move(key), Type::VALUE, std::move(content)}; }
+Record value(std::string key, std::string content, const uint64_t seq = 0)
+{
+    return {std::move(key), seq, Type::VALUE, std::move(content)};
+}
 
-Record tombstone(std::string key) { return {std::move(key), Type::TOMBSTONE, ""}; }
+Record tombstone(std::string key, const uint64_t seq = 0) { return {std::move(key), seq, Type::TOMBSTONE, ""}; }
 
 std::unique_ptr<Iterator> source(std::vector<Record> records)
 {
@@ -50,6 +53,7 @@ void expectRecords(const std::vector<Record>& actual, const std::vector<Record>&
     for (size_t i = 0; i < expected.size(); ++i)
     {
         EXPECT_EQ(expected[i].key, actual[i].key) << "record index: " << i;
+        EXPECT_EQ(expected[i].seq, actual[i].seq) << "record index: " << i;
         EXPECT_EQ(expected[i].type, actual[i].type) << "record index: " << i;
         EXPECT_EQ(expected[i].value, actual[i].value) << "record index: " << i;
     }
@@ -84,33 +88,33 @@ TEST(MergeSortedTest, MergesDisjointSourcesInKeyOrder)
 TEST(MergeSortedTest, EarlierSourceWinsDuplicateAndLaterSourceContinues)
 {
     std::vector<std::unique_ptr<Iterator>> sources;
-    sources.push_back(source({value("alpha", "new"), value("gamma", "new-gamma")}));
+    sources.push_back(source({value("alpha", "new", 30), value("gamma", "new-gamma", 50)}));
     sources.push_back(source({
-        value("alpha", "old"),
-        value("beta", "kept"),
-        value("delta", "also-kept"),
+        value("alpha", "old", 20),
+        value("beta", "kept", 25),
+        value("delta", "also-kept", 40),
     }));
 
     const auto merged = mergeSorted(sources);
 
     expectRecords(merged, {
-                              value("alpha", "new"),
-                              value("beta", "kept"),
-                              value("delta", "also-kept"),
-                              value("gamma", "new-gamma"),
+                              value("alpha", "new", 30),
+                              value("beta", "kept", 25),
+                              value("delta", "also-kept", 40),
+                              value("gamma", "new-gamma", 50),
                           });
 }
 
 TEST(MergeSortedTest, KeepsTombstoneFromWinningSource)
 {
     std::vector<std::unique_ptr<Iterator>> sources;
-    sources.push_back(source({tombstone("alpha")}));
+    sources.push_back(source({tombstone("alpha", 9)}));
     sources.push_back(source({value("alpha", "old"), value("beta", "kept")}));
 
     const auto merged = mergeSorted(sources);
 
     expectRecords(merged, {
-                              tombstone("alpha"),
+                              tombstone("alpha", 9),
                               value("beta", "kept"),
                           });
 }

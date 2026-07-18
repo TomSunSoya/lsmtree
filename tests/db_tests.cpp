@@ -88,8 +88,9 @@ void addTableAtLevel(const std::filesystem::path& root, Manifest& manifest,
 
     {
         MemTable table(walPath.string());
+        uint64_t seq = 1;
         for (const auto& [key, value] : records)
-            ASSERT_TRUE(table.put(key, value)) << "expected fixture put to succeed for key: " << key;
+            ASSERT_TRUE(table.put(key, seq++, value)) << "expected fixture put to succeed for key: " << key;
 
         ASSERT_NO_THROW(keyRange = SSTable::build(table, tablePath));
     }
@@ -217,12 +218,16 @@ TEST(DBTest, ReopensFromWal)
     }
 
     {
-        const DB db(root, kManualFlushThreshold);
+        DB db(root, kManualFlushThreshold);
 
         ASSERT_NO_FATAL_FAILURE(expectGet(db, "alpha", "one"));
         ASSERT_NO_FATAL_FAILURE(expectGet(db, "beta", "two"));
         expectMissing(db, "gamma");
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "gamma", "three"));
     }
+
+    ASSERT_NO_FATAL_FAILURE(
+        expectFileContent(root / "wal" / "wal_0.wal", "P,1,5,alpha=3,one\nP,2,4,beta=3,two\nP,3,5,gamma=5,three\n"));
 }
 
 TEST(DBTest, ReopensFromWalWithDeletedKeyHidden)
@@ -278,7 +283,7 @@ TEST(DBTest, WritesToExpectedWalPath)
         ASSERT_NO_FATAL_FAILURE(expectPut(db, "beta", "two"));
     }
 
-    ASSERT_NO_FATAL_FAILURE(expectFileContent(walPath, "P,5,alpha=3,one\nP,4,beta=3,two\n"));
+    ASSERT_NO_FATAL_FAILURE(expectFileContent(walPath, "P,1,5,alpha=3,one\nP,2,4,beta=3,two\n"));
 }
 
 TEST(DBTest, FlushedTombstoneHidesOlderSSTableValueButKeepsOtherKeys)
@@ -326,7 +331,7 @@ TEST(DBTest, PutDoesNotAutoFlushWhenMemTableSizeEqualsThreshold)
         ASSERT_NO_FATAL_FAILURE(expectGet(db, "alpha", "one"));
     }
 
-    ASSERT_NO_FATAL_FAILURE(expectFileContent(walPath, "P,5,alpha=3,one\n"));
+    ASSERT_NO_FATAL_FAILURE(expectFileContent(walPath, "P,1,5,alpha=3,one\n"));
 }
 
 TEST(DBTest, PutAutoFlushesWhenMemTableSizeExceedsThreshold)
@@ -357,7 +362,7 @@ TEST(DBTest, PutAutoFlushesWhenMemTableSizeExceedsThreshold)
         ASSERT_NO_FATAL_FAILURE(expectGet(db, "d", "4"));
     }
 
-    ASSERT_NO_FATAL_FAILURE(expectFileContent(newWalPath, "P,1,d=1,4\n"));
+    ASSERT_NO_FATAL_FAILURE(expectFileContent(newWalPath, "P,3,1,d=1,4\n"));
 }
 
 TEST(DBTest, FlushPublishesSSTableAndRotatesWal)
@@ -428,6 +433,49 @@ TEST(DBTest, FlushPersistsSSTableMetadataInManifest)
     EXPECT_EQ(std::filesystem::file_size(tablePath), level[0].size);
     EXPECT_EQ("alpha", level[0].minKey);
     EXPECT_EQ("zulu", level[0].maxKey);
+    EXPECT_EQ(3, manifest.lastSeq());
+}
+
+TEST(DBTest, ReopenContinuesSequenceFromManifestAfterFlush)
+{
+    const std::filesystem::path root("db_tests_reopen_sequence_from_manifest");
+    const ScopedPathCleanup cleanup(root);
+    const std::filesystem::path activeWalPath = root / "wal" / "wal_1.wal";
+
+    {
+        DB db(root, kManualFlushThreshold);
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "alpha", "one"));
+        ASSERT_NO_THROW(db.flush());
+    }
+
+    {
+        DB db(root, kManualFlushThreshold);
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "beta", "two"));
+    }
+
+    ASSERT_NO_FATAL_FAILURE(expectFileContent(activeWalPath, "P,2,4,beta=3,two\n"));
+}
+
+TEST(DBTest, ReopenContinuesSequenceFromActiveWal)
+{
+    const std::filesystem::path root("db_tests_reopen_sequence_from_active_wal");
+    const ScopedPathCleanup cleanup(root);
+
+    {
+        DB db(root, kManualFlushThreshold);
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "alpha", "one"));
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "beta", "two"));
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "gamma", "three"));
+    }
+
+    {
+        DB db(root, kManualFlushThreshold);
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "delta", "four"));
+        ASSERT_NO_THROW(db.flush());
+    }
+
+    const Manifest manifest(root / "MANIFEST");
+    EXPECT_EQ(4, manifest.lastSeq());
 }
 
 TEST(DBTest, GetFallsBackToFlushedSSTable)
@@ -499,7 +547,7 @@ TEST(DBTest, NewActiveMemTableWritesToNextWalAfterFlush)
     }
 
     EXPECT_FALSE(std::filesystem::exists(oldWalPath));
-    ASSERT_NO_FATAL_FAILURE(expectFileContent(newWalPath, "P,4,beta=3,two\n"));
+    ASSERT_NO_FATAL_FAILURE(expectFileContent(newWalPath, "P,2,4,beta=3,two\n"));
 }
 
 TEST(DBTest, ReopensFromFlushedSSTable)
@@ -589,8 +637,8 @@ TEST(DBTest, ReopenRemovesWalFilesOlderThanCurrentSSTableNumber)
     }
 
     ASSERT_TRUE(std::filesystem::exists(root / "sstable" / "sst_0.sst"));
-    ASSERT_NO_FATAL_FAILURE(writeFile(oldWalPath, "P,5,stale=7,ignored\n"));
-    ASSERT_NO_FATAL_FAILURE(writeFile(currentWalPath, "P,4,beta=3,two\n"));
+    ASSERT_NO_FATAL_FAILURE(writeFile(oldWalPath, "P,1,5,stale=7,ignored\n"));
+    ASSERT_NO_FATAL_FAILURE(writeFile(currentWalPath, "P,2,4,beta=3,two\n"));
 
     {
         const DB db(root, kManualFlushThreshold);
@@ -619,7 +667,7 @@ TEST(DBTest, ReopenKeepsWalFilesThatDoNotMatchOldNumberPattern)
         ASSERT_NO_THROW(db.flush());
     }
 
-    ASSERT_NO_FATAL_FAILURE(writeFile(staleWalPath, "P,5,stale=7,ignored\n"));
+    ASSERT_NO_FATAL_FAILURE(writeFile(staleWalPath, "P,1,5,stale=7,ignored\n"));
     ASSERT_NO_FATAL_FAILURE(writeFile(malformedWalPath, "kept"));
     ASSERT_NO_FATAL_FAILURE(writeFile(wrongSuffixPath, "kept"));
     ASSERT_NO_FATAL_FAILURE(writeFile(futureWalPath, "kept"));
@@ -776,7 +824,7 @@ TEST(DBTest, CompactIgnoresOrphanedSSTableThatWouldResurrectDeletedKey)
 
         {
             MemTable orphan(orphanWalPath.string());
-            ASSERT_TRUE(orphan.put("deleted", "orphan-value"));
+            ASSERT_TRUE(orphan.put("deleted", 1, "orphan-value"));
             ASSERT_NO_THROW(SSTable::build(orphan, orphanSSTablePath));
         }
         ASSERT_TRUE(std::filesystem::is_regular_file(orphanSSTablePath));

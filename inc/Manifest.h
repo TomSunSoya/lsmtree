@@ -1,7 +1,5 @@
 #pragma once
 
-#include <cstddef>
-#include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <optional>
@@ -18,7 +16,8 @@ class Manifest
 
     [[nodiscard]] uint64_t nextNumber() const;
     uint64_t allocateNumber();
-
+    [[nodiscard]] uint64_t lastSeq() const;
+    void setLastSeq(uint64_t lastSeq);
     void addTable(uint64_t number, uint64_t size, std::string_view minKey, std::string_view maxKey,
                   uint32_t targetLevel);
     void replaceTables(const std::vector<uint64_t>& removed, const std::vector<TableMeta>& added, uint32_t targetLevel);
@@ -38,6 +37,7 @@ class Manifest
     std::vector<std::vector<TableMeta>> levels_;
     uint64_t nextTableNumber_{};
     uint64_t logNumber_{};
+    uint64_t lastSeq_{};
 
-    static constexpr uint8_t kManifestFormatVersion = 2;
+    static constexpr uint8_t kManifestFormatVersion = 3;
 };

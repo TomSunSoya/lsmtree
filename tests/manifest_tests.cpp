@@ -42,9 +42,10 @@ TEST(ManifestTest, MissingManifestStartsWithEmptyTableSet)
 
     EXPECT_TRUE(manifest.allTableNumbers().empty());
     EXPECT_EQ(0, manifest.nextNumber());
+    EXPECT_EQ(0, manifest.lastSeq());
 }
 
-TEST(ManifestTest, SaveAndReloadPreservesTablesSizesAndNextNumber)
+TEST(ManifestTest, SaveAndReloadPreservesTablesSizesNextNumberAndLastSequence)
 {
     const std::filesystem::path root("manifest_tests_save_reload");
     const ScopedPathCleanup cleanup(root);
@@ -60,6 +61,7 @@ TEST(ManifestTest, SaveAndReloadPreservesTablesSizesAndNextNumber)
 
         manifest.addTable(first, 101, "apple", "mango", 0);
         manifest.addTable(second, 202, "nectarine", "zucchini", 0);
+        manifest.setLastSeq(47);
         ASSERT_NO_THROW(manifest.save());
     }
 
@@ -74,6 +76,7 @@ TEST(ManifestTest, SaveAndReloadPreservesTablesSizesAndNextNumber)
     EXPECT_EQ("mango", reloaded.level(0)[1].maxKey);
     EXPECT_EQ(2, reloaded.nextNumber());
     EXPECT_EQ(2, reloaded.allocateNumber());
+    EXPECT_EQ(47, reloaded.lastSeq());
 }
 
 TEST(ManifestTest, SaveAndReloadPreservesArbitraryKeyBytes)
