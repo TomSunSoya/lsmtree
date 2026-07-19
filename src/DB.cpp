@@ -148,6 +148,8 @@ std::vector<TableMeta> writeCompactionOutput(Manifest& manifest, const std::file
         currentSliceBytes += serializedRecordSize(records[recordIndex]);
         if (currentSliceBytes <= sliceThreshold)
             continue;
+        if (recordIndex + 1 < records.size() && records[recordIndex].key == records[recordIndex + 1].key)
+            continue;
 
         outputTables.push_back(
             writeCompactionSlice(manifest, dataDirectory, records.subspan(sliceBegin, recordIndex - sliceBegin + 1)));

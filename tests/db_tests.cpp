@@ -10,7 +10,8 @@
 
 #include <gtest/gtest.h>
 
-#include "DB.h"
+// Include the implementation so this test translation unit can exercise the anonymous-namespace compaction helper.
+#include "../src/DB.cpp"
 #include "Manifest.h"
 #include "SSTable.h"
 #include "test_support.h"
@@ -1182,6 +1183,61 @@ TEST(DBTest, CompactSplitsOutputIntoNonOverlappingLevelOneTablesAndSurvivesReope
         ASSERT_NO_FATAL_FAILURE(expectScanValues(db, "a", "f", expected));
         for (const auto& [key, value] : expected)
             ASSERT_NO_FATAL_FAILURE(expectGet(db, key, value));
+    }
+}
+
+TEST(DBTest, WriteCompactionOutputKeepsEveryVersionOfOneKeyInTheSameTable)
+{
+    const std::filesystem::path root("db_tests_compaction_output_keeps_versions_together");
+    const ScopedPathCleanup cleanup(root);
+    constexpr uint64_t sliceThreshold = 30;
+    std::vector<Record> records{
+        {"alpha", 40, Type::VALUE, "left"}, {"shared", 30, Type::VALUE, "new"}, {"shared", 20, Type::TOMBSTONE, ""},
+        {"shared", 10, Type::VALUE, "old"}, {"zulu", 0, Type::VALUE, "right"},
+    };
+
+    Manifest manifest(root / "MANIFEST");
+    std::vector<TableMeta> outputTables;
+    ASSERT_NO_THROW(outputTables = writeCompactionOutput(manifest, root, std::span(records), sliceThreshold));
+
+    ASSERT_EQ(2, outputTables.size());
+    for (size_t left = 0; left < outputTables.size(); ++left)
+    {
+        for (size_t right = left + 1; right < outputTables.size(); ++right)
+        {
+            EXPECT_FALSE(rangesOverlap(outputTables[left], outputTables[right].minKey, outputTables[right].maxKey));
+        }
+    }
+
+    std::vector<Record> persisted;
+    for (const TableMeta& table : outputTables)
+    {
+        SSTableIterator iterator(sstablePath(root, table.number));
+        std::optional<Key> previous;
+        const size_t tableBegin = persisted.size();
+        while (iterator.valid())
+        {
+            const Record& current = iterator.current();
+            const Key currentKey{current.key, current.seq};
+            if (previous)
+                EXPECT_TRUE(*previous < currentKey);
+            previous = currentKey;
+            persisted.push_back(current);
+            iterator.advance();
+        }
+
+        ASSERT_LT(tableBegin, persisted.size());
+        EXPECT_EQ(table.minKey, persisted[tableBegin].key);
+        EXPECT_EQ(table.maxKey, persisted.back().key);
+    }
+
+    ASSERT_EQ(records.size(), persisted.size());
+    for (size_t index = 0; index < records.size(); ++index)
+    {
+        EXPECT_EQ(records[index].key, persisted[index].key) << "record index: " << index;
+        EXPECT_EQ(records[index].seq, persisted[index].seq) << "record index: " << index;
+        EXPECT_EQ(records[index].type, persisted[index].type) << "record index: " << index;
+        EXPECT_EQ(records[index].value, persisted[index].value) << "record index: " << index;
     }
 }
 
