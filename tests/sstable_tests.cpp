@@ -55,6 +55,39 @@ void expectTombstone(const SSTable& table, const std::string& key)
     EXPECT_EQ(Result::TOMBSTONE, table.get(key, kReadLatest, actual)) << "expected tombstone for key: " << key;
 }
 
+void expectGet(const SSTable& table, const std::string& key, const uint64_t readSeq, const std::string& expected)
+{
+    std::string actual;
+    ASSERT_EQ(Result::VALUE, table.get(key, readSeq, actual))
+        << "expected key to exist at seq " << readSeq << ": " << key;
+    EXPECT_EQ(expected, actual) << "unexpected value for key: " << key;
+}
+
+void expectMissing(const SSTable& table, const std::string& key, const uint64_t readSeq)
+{
+    std::string actual = "unchanged";
+    EXPECT_EQ(Result::ABSENT, table.get(key, readSeq, actual))
+        << "expected key to be missing at seq " << readSeq << ": " << key;
+}
+
+void expectTombstone(const SSTable& table, const std::string& key, const uint64_t readSeq)
+{
+    std::string actual = "unchanged";
+    EXPECT_EQ(Result::TOMBSTONE, table.get(key, readSeq, actual))
+        << "expected tombstone at seq " << readSeq << ": " << key;
+}
+
+std::array<uint64_t, 3> readFooterSizes(const std::filesystem::path& path)
+{
+    std::ifstream in(path, std::ios::binary);
+    EXPECT_TRUE(in.is_open()) << "expected file to exist: " << path;
+
+    std::array<uint64_t, 3> sizes{};
+    in.seekg(-static_cast<std::streamoff>(3 * sizeof(uint64_t)), std::ios::end);
+    in.read(reinterpret_cast<char*>(sizes.data()), 3 * sizeof(uint64_t));
+    return sizes;
+}
+
 std::string hexDump(std::string_view content)
 {
     std::ostringstream out;
@@ -569,6 +602,47 @@ TEST(SSTableTest, SparseIndexLocatesKeysAcrossMultipleBlocks)
     ASSERT_FALSE(falsePositiveBeforeFirst.empty());
     ASSERT_LT(falsePositiveBeforeFirst, multiBlockKey(0));
     expectMissing(sstable, falsePositiveBeforeFirst);
+}
+
+TEST(SSTableTest, SparseIndexFindsVisibleVersionWhenOneKeySpansMultipleBlocks)
+{
+    const std::filesystem::path root("sstable_tests_sparse_index_versions");
+    const ScopedPathCleanup cleanup(root);
+    const std::filesystem::path walPath = root / "source.wal";
+    const std::filesystem::path sstablePath = root / "table.sst";
+    constexpr size_t valueSize = 2'100;
+    std::filesystem::create_directories(root);
+
+    const auto versionValue = [](const char fill) { return std::string(valueSize, fill); };
+    {
+        MemTable memTable(walPath.string());
+        ASSERT_NO_FATAL_FAILURE(expectPut(memTable, "alpha", "left"));
+        ASSERT_NO_FATAL_FAILURE(expectPut(memTable, "shared", versionValue('a'), 60));
+        ASSERT_NO_FATAL_FAILURE(expectPut(memTable, "shared", versionValue('b'), 50));
+        ASSERT_TRUE(memTable.remove("shared", 40));
+        ASSERT_NO_FATAL_FAILURE(expectPut(memTable, "shared", versionValue('c'), 30));
+        ASSERT_NO_FATAL_FAILURE(expectPut(memTable, "shared", versionValue('d'), 20));
+        ASSERT_NO_FATAL_FAILURE(expectPut(memTable, "shared", versionValue('e'), 10));
+        ASSERT_NO_FATAL_FAILURE(expectPut(memTable, "zulu-a", versionValue('y')));
+        ASSERT_NO_FATAL_FAILURE(expectPut(memTable, "zulu-b", versionValue('z')));
+
+        ASSERT_NO_THROW(SSTable::build(memTable, sstablePath));
+    }
+
+    const auto [recordsSize, bloomSize, indexSize] = readFooterSizes(sstablePath);
+    EXPECT_GT(recordsSize, 3 * 4 * 1024);
+    EXPECT_GT(bloomSize, 0);
+    EXPECT_EQ((sizeof(uint32_t) + 5 + sizeof(uint64_t)) + 2 * (sizeof(uint32_t) + 6 + sizeof(uint64_t)) +
+                  (sizeof(uint32_t) + 6 + sizeof(uint64_t)),
+              indexSize);
+
+    const SSTable sstable(sstablePath);
+    ASSERT_NO_FATAL_FAILURE(expectGet(sstable, "shared", 60, versionValue('a')));
+    ASSERT_NO_FATAL_FAILURE(expectGet(sstable, "shared", 50, versionValue('b')));
+    ASSERT_NO_FATAL_FAILURE(expectTombstone(sstable, "shared", 40));
+    ASSERT_NO_FATAL_FAILURE(expectGet(sstable, "shared", 35, versionValue('c')));
+    ASSERT_NO_FATAL_FAILURE(expectGet(sstable, "shared", 15, versionValue('e')));
+    ASSERT_NO_FATAL_FAILURE(expectMissing(sstable, "shared", 9));
 }
 
 TEST(SSTableTest, ConstructorCachesSparseIndexForSubsequentReads)

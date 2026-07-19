@@ -222,15 +222,23 @@ std::vector<Index> SSTable::readSparseIndex() const
 
 std::optional<std::pair<Index, uint64_t>> SSTable::getBlock(const std::string_view key) const
 {
-    const auto position =
-        std::upper_bound(indices_.begin(), indices_.end(), key,
-                         [](const std::string_view value, const Index& index) { return index.key > value; });
-
-    if (position == indices_.begin())
+    if (indices_.empty())
         return std::nullopt;
 
-    const uint64_t blockEnd = position == indices_.end() ? recordsSize_ : position->offset;
-    return std::make_pair(*std::prev(position), blockEnd);
+    auto position = std::lower_bound(indices_.begin(), indices_.end(), key,
+                                     [](const Index& index, std::string_view value) { return index.key < value; });
+
+    if (position == indices_.begin() && position->key > key)
+        return std::nullopt;
+
+    if (position == indices_.end() || position != indices_.begin() && position->key >= key)
+        position = std::prev(position);
+    auto it = position;
+    while (it != indices_.end() && it->key <= key)
+        ++it;
+
+    const uint64_t blockEnd = it == indices_.end() ? recordsSize_ : it->offset;
+    return std::make_pair(*position, blockEnd);
 }
 
 uint64_t SSTable::addRecordToFile(const std::span<Record> records, const std::filesystem::path& path)
