@@ -20,15 +20,18 @@ class DB
 
     bool put(const std::string& key, const std::string& value);
     bool get(std::string_view key, std::string& value) const;
+    bool get(std::string_view key, uint64_t readSeq, std::string& value) const;
     bool remove(const std::string& key);
 
     void flush();
     void compact();
     [[nodiscard]] std::vector<Record> scan(std::string_view start, std::string_view end) const;
 
+    [[nodiscard]] uint64_t getSnapshot() const;
+
   private:
-    bool searchSSTables(std::string_view key, std::string& value) const;
-    Result searchTable(uint64_t tableNumber, std::string_view key, std::string& value) const;
+    bool searchSSTables(std::string_view key, uint64_t readSeq, std::string& value) const;
+    Result searchTable(uint64_t tableNumber, std::string_view key, uint64_t readSeq, std::string& value) const;
     void compactLevel0();
     void maybeCompact();
     void compactLevel(uint64_t n);

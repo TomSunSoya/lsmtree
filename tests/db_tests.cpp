@@ -41,10 +41,23 @@ void expectGet(const DB& db, const std::string& key, const std::string& expected
     EXPECT_EQ(expected, actual) << "unexpected value for key: " << key;
 }
 
+void expectGet(const DB& db, const std::string& key, const uint64_t readSeq, const std::string& expected)
+{
+    std::string actual;
+    ASSERT_TRUE(db.get(key, readSeq, actual)) << "expected key to exist at seq " << readSeq << ": " << key;
+    EXPECT_EQ(expected, actual) << "unexpected value for key: " << key;
+}
+
 void expectMissing(const DB& db, const std::string& key)
 {
     std::string actual = "unchanged";
     EXPECT_FALSE(db.get(key, actual)) << "expected key to be missing: " << key;
+}
+
+void expectMissing(const DB& db, const std::string& key, const uint64_t readSeq)
+{
+    std::string actual = "unchanged";
+    EXPECT_FALSE(db.get(key, readSeq, actual)) << "expected key to be missing at seq " << readSeq << ": " << key;
 }
 
 void expectScanValues(const DB& db, const std::string_view start, const std::string_view end,
@@ -86,14 +99,19 @@ void addTableAtLevel(const std::filesystem::path& root, Manifest& manifest,
     const auto tablePath = root / "sstable" / ("sst_" + std::to_string(tableNumber) + ".sst");
     std::pair<std::string, std::string> keyRange;
 
+    uint64_t seq = 1;
     {
         MemTable table(walPath.string());
-        uint64_t seq = 1;
         for (const auto& [key, value] : records)
             ASSERT_TRUE(table.put(key, seq++, value)) << "expected fixture put to succeed for key: " << key;
 
         ASSERT_NO_THROW(keyRange = SSTable::build(table, tablePath));
     }
+
+    // Fixture tables bypass DB::nextSeq_, so keep lastSeq ahead of every crafted seq to preserve the
+    // invariant that all persisted records are visible to a read at the latest sequence number.
+    if (seq - 1 > manifest.lastSeq())
+        manifest.setLastSeq(seq - 1);
 
     ASSERT_NO_THROW(manifest.addTable(tableNumber, recordedSize.value_or(std::filesystem::file_size(tablePath)),
                                       keyRange.first, keyRange.second, targetLevel));
@@ -744,6 +762,77 @@ TEST(DBTest, NewerFlushedSSTableWinsForDuplicateKey)
         ASSERT_NO_FATAL_FAILURE(expectPut(db, "key", "new"));
         ASSERT_NO_THROW(db.flush());
 
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "key", "new"));
+    }
+}
+
+TEST(DBTest, SnapshotGetReadsValueVisibleAtSnapshot)
+{
+    const std::filesystem::path root("db_tests_snapshot_reads_old_value");
+    const ScopedPathCleanup cleanup(root);
+
+    {
+        DB db(root, kManualFlushThreshold);
+
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "key", "old"));
+        const uint64_t snapshot = db.getSnapshot();
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "key", "new"));
+
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "key", snapshot, "old"));
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "key", "new"));
+    }
+}
+
+TEST(DBTest, SnapshotTakenBeforePutDoesNotSeeNewValue)
+{
+    const std::filesystem::path root("db_tests_snapshot_before_put");
+    const ScopedPathCleanup cleanup(root);
+
+    {
+        DB db(root, kManualFlushThreshold);
+
+        const uint64_t snapshot = db.getSnapshot();
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "key", "new"));
+
+        ASSERT_NO_FATAL_FAILURE(expectMissing(db, "key", snapshot));
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "key", "new"));
+    }
+}
+
+TEST(DBTest, SnapshotGetDoesNotSeeTombstoneWrittenAfterSnapshot)
+{
+    const std::filesystem::path root("db_tests_snapshot_tombstone_invisible");
+    const ScopedPathCleanup cleanup(root);
+
+    {
+        DB db(root, kManualFlushThreshold);
+
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "key", "old"));
+        const uint64_t snapshot = db.getSnapshot();
+        ASSERT_NO_FATAL_FAILURE(expectRemove(db, "key"));
+
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "key", snapshot, "old"));
+        expectMissing(db, "key");
+    }
+}
+
+TEST(DBTest, SnapshotGetFallsThroughNewerSSTableToOlderTable)
+{
+    const std::filesystem::path root("db_tests_snapshot_falls_through_sstables");
+    const ScopedPathCleanup cleanup(root);
+
+    {
+        DB db(root, kManualFlushThreshold);
+
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "key", "old"));
+        ASSERT_NO_THROW(db.flush());
+
+        const uint64_t snapshot = db.getSnapshot();
+
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "key", "new"));
+        ASSERT_NO_THROW(db.flush());
+
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "key", snapshot, "old"));
         ASSERT_NO_FATAL_FAILURE(expectGet(db, "key", "new"));
     }
 }

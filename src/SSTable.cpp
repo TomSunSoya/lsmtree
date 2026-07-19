@@ -163,7 +163,7 @@ SSTable::SSTable(std::filesystem::path path) : path_(std::move(path))
     indices_ = readSparseIndex();
 }
 
-Result SSTable::get(const std::string_view key, std::string& value) const
+Result SSTable::get(const std::string_view key, uint64_t readSeq, std::string& value) const
 {
     if (!std::filesystem::exists(path_) || !bloomFilter_->mightContain(key))
         return Result::ABSENT;
@@ -186,7 +186,9 @@ Result SSTable::get(const std::string_view key, std::string& value) const
             break;
 
         currentOffset += serializedRecordSize(record);
-        if (record->key != key)
+        if (record->key > key)
+            break;
+        if (record->key < key || record->seq > readSeq)
             continue;
 
         if (record->type != Type::VALUE)

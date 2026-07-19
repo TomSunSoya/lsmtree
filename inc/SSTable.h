@@ -24,7 +24,7 @@ class SSTable
 
     explicit SSTable(std::filesystem::path path);
 
-    Result get(std::string_view key, std::string& value) const;
+    Result get(std::string_view key, uint64_t readSeq, std::string& value) const;
 
   private:
     static constexpr size_t kBlockSize = 4 * 1024;

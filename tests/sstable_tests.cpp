@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <limits>
 #include <span>
 #include <sstream>
 #include <stdexcept>
@@ -32,23 +33,26 @@ void expectPut(MemTable& table, const std::string& key, const std::string& value
     ASSERT_TRUE(table.put(key, seq, value)) << "expected put to succeed for key: " << key;
 }
 
+// These helpers assert on the newest world and predate MVCC, so they read at the maximum seq.
+constexpr uint64_t kReadLatest = std::numeric_limits<uint64_t>::max();
+
 void expectGet(const SSTable& table, const std::string& key, const std::string& expected)
 {
     std::string actual;
-    ASSERT_EQ(Result::VALUE, table.get(key, actual)) << "expected key to exist: " << key;
+    ASSERT_EQ(Result::VALUE, table.get(key, kReadLatest, actual)) << "expected key to exist: " << key;
     EXPECT_EQ(expected, actual) << "unexpected value for key: " << key;
 }
 
 void expectMissing(const SSTable& table, const std::string& key)
 {
     std::string actual = "unchanged";
-    EXPECT_EQ(Result::ABSENT, table.get(key, actual)) << "expected key to be missing: " << key;
+    EXPECT_EQ(Result::ABSENT, table.get(key, kReadLatest, actual)) << "expected key to be missing: " << key;
 }
 
 void expectTombstone(const SSTable& table, const std::string& key)
 {
     std::string actual = "unchanged";
-    EXPECT_EQ(Result::TOMBSTONE, table.get(key, actual)) << "expected tombstone for key: " << key;
+    EXPECT_EQ(Result::TOMBSTONE, table.get(key, kReadLatest, actual)) << "expected tombstone for key: " << key;
 }
 
 std::string hexDump(std::string_view content)

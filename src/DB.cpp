@@ -219,11 +219,13 @@ bool DB::put(const std::string& key, const std::string& value)
     return true;
 }
 
-bool DB::get(const std::string_view key, std::string& value) const
+bool DB::get(const std::string_view key, std::string& value) const { return get(key, nextSeq_ - 1, value); }
+
+bool DB::get(const std::string_view key, const uint64_t readSeq, std::string& value) const
 {
-    const Result result = activeMemTable_->get(key, nextSeq_ - 1, value);
+    const Result result = activeMemTable_->get(key, readSeq, value);
     if (result == Result::ABSENT)
-        return searchSSTables(key, value);
+        return searchSSTables(key, readSeq, value);
     return result == Result::VALUE;
 }
 
@@ -275,26 +277,29 @@ std::vector<Record> DB::scan(const std::string_view start, const std::string_vie
     return std::ranges::to<std::vector>(visibleRecords);
 }
 
-Result DB::searchTable(uint64_t tableNumber, std::string_view key, std::string& value) const
+uint64_t DB::getSnapshot() const { return nextSeq_ - 1; }
+
+Result DB::searchTable(const uint64_t tableNumber, const std::string_view key, const uint64_t readSeq,
+                       std::string& value) const
 {
-    if (auto iter = tables_.find(tableNumber); iter != tables_.end())
+    if (const auto iter = tables_.find(tableNumber); iter != tables_.end())
     {
-        return iter->second->get(key, value);
+        return iter->second->get(key, readSeq, value);
     }
     auto sstable = std::make_unique<SSTable>(sstablePath(dataDirectory_, tableNumber));
-    const auto res = sstable->get(key, value);
+    const auto res = sstable->get(key, readSeq, value);
     tables_[tableNumber] = std::move(sstable);
     return res;
 }
 
-bool DB::searchSSTables(std::string_view key, std::string& value) const
+bool DB::searchSSTables(const std::string_view key, const uint64_t readSeq, std::string& value) const
 {
     for (const TableMeta& table : manifest_->level(0))
     {
         if (key < table.minKey || key > table.maxKey)
             continue;
 
-        const Result result = searchTable(table.number, key, value);
+        const Result result = searchTable(table.number, key, readSeq, value);
         if (result == Result::VALUE)
             return true;
         if (result == Result::TOMBSTONE)
@@ -307,7 +312,7 @@ bool DB::searchSSTables(std::string_view key, std::string& value) const
         if (!table)
             continue;
 
-        const Result result = searchTable(table->number, key, value);
+        const Result result = searchTable(table->number, key, readSeq, value);
         if (result == Result::VALUE)
             return true;
         if (result == Result::TOMBSTONE)
