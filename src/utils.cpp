@@ -215,6 +215,10 @@ std::vector<Record> mergeSorted(std::vector<std::unique_ptr<Iterator>>& sources)
         auto& winningSource = sources[winner.sourceIndex];
         result.push_back(winningSource->current());
         winningSource->advance();
+
+        while (winningSource->valid() && winningSource->current().key == winner.key)
+            winningSource->advance();
+
         enqueueCurrent(queue, sources, winner.sourceIndex);
     }
 

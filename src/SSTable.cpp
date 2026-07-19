@@ -113,7 +113,7 @@ std::pair<std::string, std::string> SSTable::build(const MemTable& memTable, con
     std::vector<Record> records;
     records.reserve(memTable.size());
     for (const auto& [key, entry] : memTable)
-        records.emplace_back(key, entry.seq, entry.type, entry.value);
+        records.emplace_back(key.key, key.seq, entry.type, entry.value);
 
     addRecordToFile(records, path);
     return {records.front().key, records.back().key};

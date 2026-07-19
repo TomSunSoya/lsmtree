@@ -188,15 +188,24 @@ TEST(SSTableTest, IteratorExposesTombstoneRecords)
     }
 
     SSTableIterator cursor(sstablePath);
+    size_t emittedRecords = 0;
     ASSERT_TRUE(cursor.valid());
     ASSERT_NO_FATAL_FAILURE(expectRecord(cursor.current(), "alpha", 30, Type::TOMBSTONE, ""));
+    ++emittedRecords;
+
+    cursor.advance();
+    ASSERT_TRUE(cursor.valid());
+    ASSERT_NO_FATAL_FAILURE(expectRecord(cursor.current(), "alpha", 10, Type::VALUE, "one"));
+    ++emittedRecords;
 
     cursor.advance();
     ASSERT_TRUE(cursor.valid());
     ASSERT_NO_FATAL_FAILURE(expectRecord(cursor.current(), "beta", 20, Type::VALUE, "two"));
+    ++emittedRecords;
 
     cursor.advance();
     EXPECT_FALSE(cursor.valid());
+    EXPECT_EQ(3, emittedRecords);
 }
 
 TEST(SSTableTest, IteratorRejectsMissingFile)

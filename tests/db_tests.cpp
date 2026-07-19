@@ -319,7 +319,7 @@ TEST(DBTest, PutDoesNotAutoFlushWhenMemTableSizeEqualsThreshold)
     const ScopedPathCleanup cleanup(root);
     const std::filesystem::path walPath = root / "wal" / "wal_0.wal";
     const std::filesystem::path sstablePath = root / "sstable" / "sst_0.sst";
-    constexpr uint64_t threshold = 9;
+    constexpr uint64_t threshold = 5 + 3 + sizeof(Type) + sizeof(uint64_t);
 
     {
         DB db(root, threshold);
@@ -341,7 +341,7 @@ TEST(DBTest, PutAutoFlushesWhenMemTableSizeExceedsThreshold)
     const std::filesystem::path oldWalPath = root / "wal" / "wal_0.wal";
     const std::filesystem::path newWalPath = root / "wal" / "wal_1.wal";
     const std::filesystem::path sstablePath = root / "sstable" / "sst_0.sst";
-    constexpr uint64_t threshold = 6;
+    constexpr uint64_t threshold = 1 + 2 + sizeof(Type) + sizeof(uint64_t);
 
     {
         DB db(root, threshold);
@@ -1535,6 +1535,21 @@ TEST(DBTest, ScanReturnsSortedHalfOpenRangeFromActiveMemTable)
                                                  }));
         ASSERT_NO_FATAL_FAILURE(expectScanValues(db, "gamma", "gamma", {}));
         ASSERT_NO_FATAL_FAILURE(expectScanValues(db, "z", "a", {}));
+    }
+}
+
+TEST(DBTest, ScanReturnsOnlyNewestVersionForRepeatedKeyInActiveMemTable)
+{
+    const std::filesystem::path root("db_tests_scan_repeated_active_key");
+    const ScopedPathCleanup cleanup(root);
+
+    {
+        DB db(root, kManualFlushThreshold);
+
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "alpha", "old"));
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "alpha", "new"));
+
+        ASSERT_NO_FATAL_FAILURE(expectScanValues(db, "", "~", {{"alpha", "new"}}));
     }
 }
 

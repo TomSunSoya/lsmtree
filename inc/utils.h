@@ -51,6 +51,19 @@ struct TableMeta
     std::string maxKey;
 };
 
+struct Key
+{
+    std::string key;
+    uint64_t seq;
+
+    bool operator<(const Key& rhs) const
+    {
+        if (key != rhs.key)
+            return key < rhs.key;
+        return seq > rhs.seq;
+    }
+};
+
 constexpr std::string_view kWalPrefix = "wal_";
 constexpr std::string_view kWalSuffix = ".wal";
 constexpr std::string_view kSSTablePrefix = "sst_";

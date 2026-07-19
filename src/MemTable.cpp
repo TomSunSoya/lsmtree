@@ -120,30 +120,24 @@ bool MemTable::put(const std::string& key, const uint64_t seq, const std::string
     if (!appendToWAL(key, seq, value, Type::VALUE))
         return false;
 
-    if (const auto existing = table_.find(key); existing != table_.end())
-    {
-        assert(currentSizeBytes_ >= existing->second.value.size() + existing->first.size() + sizeof(Type));
-        currentSizeBytes_ -= existing->second.value.size();
-        currentSizeBytes_ -= existing->first.size();
-        currentSizeBytes_ -= sizeof(Type);
-    }
-
-    table_[key] = {Type::VALUE, seq, value};
+    table_[{key, seq}] = {Type::VALUE, seq, value};
     currentSizeBytes_ += value.size();
     currentSizeBytes_ += key.size();
     currentSizeBytes_ += sizeof(Type);
+    currentSizeBytes_ += sizeof(seq);
     return true;
 }
 
-Result MemTable::get(const std::string_view key, std::string& value) const
+Result MemTable::get(const std::string_view key, const uint64_t readSeq, std::string& value) const
 {
-    const auto entry = table_.find(key);
-    if (entry == table_.end())
+    const Key currentKey{std::string(key), readSeq};
+    const auto it = table_.lower_bound(currentKey);
+    if (it == table_.end() || it->first.key != key)
         return Result::ABSENT;
-    if (entry->second.type == Type::TOMBSTONE)
+    if (it->second.type == Type::TOMBSTONE)
         return Result::TOMBSTONE;
 
-    value = entry->second.value;
+    value = it->second.value;
     return Result::VALUE;
 }
 
@@ -152,19 +146,11 @@ bool MemTable::remove(const std::string& key, const uint64_t seq)
     if (!appendToWAL(key, seq, "", Type::TOMBSTONE))
         return false;
 
-    if (const auto existing = table_.find(key); existing != table_.end())
-    {
-        existing->second.type = Type::TOMBSTONE;
-        currentSizeBytes_ -= existing->second.value.size();
-        existing->second.seq = seq;
-        existing->second.value.clear();
-    }
-    else
-    {
-        table_[key] = {Type::TOMBSTONE, seq, ""};
-        currentSizeBytes_ += sizeof(Type);
-        currentSizeBytes_ += key.size();
-    }
+    table_[{key, seq}] = {Type::TOMBSTONE, seq, ""};
+    currentSizeBytes_ += sizeof(Type);
+    currentSizeBytes_ += key.size();
+    currentSizeBytes_ += sizeof(seq);
+
     return true;
 }
 
@@ -249,7 +235,7 @@ bool MemTable::restoreFromWAL()
     size_t lastGoodOffset = 0;
     for (const auto& [key, entry] : parseWALRecords(content, lastGoodOffset))
     {
-        table_[key] = entry;
+        table_.emplace(Key{key, entry.seq}, entry);
         currentSeq_ = std::max(entry.seq, currentSeq_);
     }
 
@@ -299,7 +285,7 @@ void MemTableIterator::refreshCurrentRecord()
     }
 
     currentRecord_ = Record{
-        currentIterator_->first,
+        currentIterator_->first.key,
         currentIterator_->second.seq,
         currentIterator_->second.type,
         currentIterator_->second.value,

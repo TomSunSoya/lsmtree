@@ -1,6 +1,5 @@
 #pragma once
 
-#include <cstddef>
 #include <filesystem>
 #include <map>
 #include <optional>
@@ -17,19 +16,19 @@ class MemTable
     explicit MemTable(std::string_view logFilePath);
 
     bool put(const std::string& key, uint64_t seq, const std::string& value);
-    Result get(std::string_view key, std::string& value) const;
+    Result get(std::string_view key, uint64_t readSeq, std::string& value) const;
     bool remove(const std::string& key, uint64_t seq);
 
     [[nodiscard]] size_t size() const;
     [[nodiscard]] size_t size_bytes() const;
 
-    using const_iterator = std::map<std::string, Entry, std::less<>>::const_iterator;
+    using const_iterator = std::map<Key, Entry, std::less<>>::const_iterator;
 
     [[nodiscard]] const_iterator begin() const noexcept { return table_.begin(); }
 
     [[nodiscard]] const_iterator end() const noexcept { return table_.end(); }
 
-    uint64_t getMaxWALSeq() const;
+    [[nodiscard]] uint64_t getMaxWALSeq() const;
 
   private:
     struct WALFileWriter
@@ -54,7 +53,7 @@ class MemTable
     bool restoreFromWAL();
     static std::vector<std::pair<std::string, Entry>> parseWALRecords(std::string_view content, size_t& lastGoodOffset);
 
-    std::map<std::string, Entry, std::less<>> table_;
+    std::map<Key, Entry, std::less<>> table_;
     const std::filesystem::path logPath_;
     WALFileWriter walWriter_;
     size_t currentSizeBytes_;

@@ -221,7 +221,7 @@ bool DB::put(const std::string& key, const std::string& value)
 
 bool DB::get(const std::string_view key, std::string& value) const
 {
-    const Result result = activeMemTable_->get(key, value);
+    const Result result = activeMemTable_->get(key, nextSeq_ - 1, value);
     if (result == Result::ABSENT)
         return searchSSTables(key, value);
     return result == Result::VALUE;
