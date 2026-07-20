@@ -191,6 +191,24 @@ void FileWriter::finish()
 
 int FileWriter::getFd() const { return dataFile_.get(); }
 
+SnapshotIterator::SnapshotIterator(std::unique_ptr<Iterator> iterator, const uint64_t readSeq)
+    : iterator_(std::move(iterator)), readSeq_(readSeq)
+{
+    while (iterator_->valid() && iterator_->current().seq > readSeq_)
+        iterator_->advance();
+}
+
+bool SnapshotIterator::valid() const { return iterator_->valid(); }
+
+const Record& SnapshotIterator::current() const { return iterator_->current(); }
+
+void SnapshotIterator::advance()
+{
+    iterator_->advance();
+    while (valid() && current().seq > readSeq_)
+        iterator_->advance();
+}
+
 std::vector<Record> mergeSorted(std::vector<std::unique_ptr<Iterator>>& sources)
 {
     std::priority_queue<MergeItem> queue;

@@ -60,6 +60,38 @@ void expectRecords(const std::vector<Record>& actual, const std::vector<Record>&
 }
 } // namespace
 
+TEST(SnapshotIteratorTest, ConstructorPositionsAtNewestVisibleVersionAndAdvanceFindsTheNextOne)
+{
+    SnapshotIterator iterator(source({
+                                  value("k", "newest", 90),
+                                  value("k", "visible", 50),
+                                  value("k", "oldest", 10),
+                              }),
+                              60);
+
+    ASSERT_TRUE(iterator.valid());
+    EXPECT_EQ("k", iterator.current().key);
+    EXPECT_EQ(50, iterator.current().seq);
+
+    iterator.advance();
+    ASSERT_TRUE(iterator.valid());
+    EXPECT_EQ("k", iterator.current().key);
+    EXPECT_EQ(10, iterator.current().seq);
+}
+
+TEST(SnapshotIteratorTest, ConstructorSkipsInvisibleKeyAndPositionsAtNextVisibleKey)
+{
+    SnapshotIterator iterator(source({
+                                  value("a", "invisible", 90),
+                                  value("b", "visible", 50),
+                              }),
+                              60);
+
+    ASSERT_TRUE(iterator.valid());
+    EXPECT_EQ("b", iterator.current().key);
+    EXPECT_EQ(50, iterator.current().seq);
+}
+
 TEST(MergeSortedTest, EmptyAndNullSourcesProduceNoRecords)
 {
     std::vector<std::unique_ptr<Iterator>> sources;

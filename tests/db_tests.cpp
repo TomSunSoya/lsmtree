@@ -61,10 +61,10 @@ void expectMissing(const DB& db, const std::string& key, const uint64_t readSeq)
     EXPECT_FALSE(db.get(key, readSeq, actual)) << "expected key to be missing at seq " << readSeq << ": " << key;
 }
 
-void expectScanValues(const DB& db, const std::string_view start, const std::string_view end,
+void expectScanValues(const DB& db, const std::string_view start, const std::string_view end, const uint64_t readSeq,
                       const std::vector<std::pair<std::string, std::string>>& expected)
 {
-    const auto records = db.scan(start, end);
+    const auto records = db.scan(start, end, readSeq);
     ASSERT_EQ(expected.size(), records.size());
     for (size_t i = 0; i < expected.size(); ++i)
     {
@@ -72,6 +72,12 @@ void expectScanValues(const DB& db, const std::string_view start, const std::str
         EXPECT_EQ(Type::VALUE, records[i].type) << "record index: " << i;
         EXPECT_EQ(expected[i].second, records[i].value) << "record index: " << i;
     }
+}
+
+void expectScanValues(const DB& db, const std::string_view start, const std::string_view end,
+                      const std::vector<std::pair<std::string, std::string>>& expected)
+{
+    expectScanValues(db, start, end, UINT64_MAX, expected);
 }
 
 void seedCompactedLevelOne(DB& db)
@@ -1696,6 +1702,74 @@ TEST(DBTest, ScanReturnsOnlyNewestVersionForRepeatedKeyInActiveMemTable)
 
         ASSERT_NO_FATAL_FAILURE(expectScanValues(db, "", "~", {{"alpha", "new"}}));
     }
+}
+
+TEST(DBTest, SnapshotScanReadsVisibleVersionsFromActiveMemTable)
+{
+    const std::filesystem::path root("db_tests_snapshot_scan_active_memtable");
+    const ScopedPathCleanup cleanup(root);
+
+    DB db(root, kManualFlushThreshold);
+    ASSERT_NO_FATAL_FAILURE(expectPut(db, "alpha", "old"));
+    ASSERT_NO_FATAL_FAILURE(expectPut(db, "deleted", "visible"));
+    const uint64_t snapshot = db.getSnapshot();
+
+    ASSERT_NO_FATAL_FAILURE(expectPut(db, "alpha", "new"));
+    ASSERT_NO_FATAL_FAILURE(expectRemove(db, "deleted"));
+    ASSERT_NO_FATAL_FAILURE(expectPut(db, "fresh", "new-value"));
+
+    ASSERT_NO_FATAL_FAILURE(expectScanValues(db, "", "~", snapshot,
+                                             {
+                                                 {"alpha", "old"},
+                                                 {"deleted", "visible"},
+                                             }));
+    ASSERT_NO_FATAL_FAILURE(expectScanValues(db, "", "~",
+                                             {
+                                                 {"alpha", "new"},
+                                                 {"fresh", "new-value"},
+                                             }));
+}
+
+TEST(DBTest, SnapshotScanIgnoresTombstoneWrittenAfterSnapshot)
+{
+    const std::filesystem::path root("db_tests_snapshot_scan_ignores_newer_tombstone");
+    const ScopedPathCleanup cleanup(root);
+
+    DB db(root, kManualFlushThreshold);
+    ASSERT_NO_FATAL_FAILURE(expectPut(db, "k", "v"));
+    const uint64_t snapshot = db.getSnapshot();
+    ASSERT_NO_FATAL_FAILURE(expectRemove(db, "k"));
+
+    ASSERT_NO_FATAL_FAILURE(expectScanValues(db, "", "~", snapshot, {{"k", "v"}}));
+    ASSERT_NO_FATAL_FAILURE(expectScanValues(db, "", "~", {}));
+}
+
+TEST(DBTest, SnapshotScanFallsBackToOlderSSTableWhenNewerTableIsInvisible)
+{
+    const std::filesystem::path root("db_tests_snapshot_scan_falls_back_to_older_sstable");
+    const ScopedPathCleanup cleanup(root);
+
+    DB db(root, kManualFlushThreshold);
+    ASSERT_NO_FATAL_FAILURE(expectPut(db, "alpha", "old"));
+    ASSERT_NO_FATAL_FAILURE(expectPut(db, "deleted", "visible"));
+    ASSERT_NO_THROW(db.flush());
+    const uint64_t snapshot = db.getSnapshot();
+
+    ASSERT_NO_FATAL_FAILURE(expectPut(db, "alpha", "new"));
+    ASSERT_NO_FATAL_FAILURE(expectRemove(db, "deleted"));
+    ASSERT_NO_FATAL_FAILURE(expectPut(db, "fresh", "new-value"));
+    ASSERT_NO_THROW(db.flush());
+
+    ASSERT_NO_FATAL_FAILURE(expectScanValues(db, "", "~", snapshot,
+                                             {
+                                                 {"alpha", "old"},
+                                                 {"deleted", "visible"},
+                                             }));
+    ASSERT_NO_FATAL_FAILURE(expectScanValues(db, "", "~",
+                                             {
+                                                 {"alpha", "new"},
+                                                 {"fresh", "new-value"},
+                                             }));
 }
 
 TEST(DBTest, ScanActiveMemTableOverridesSSTableAndOmitsDeletedKeys)

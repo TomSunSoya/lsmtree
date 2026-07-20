@@ -263,7 +263,7 @@ void DB::flush()
 
 void DB::compact() { compactLevel0(); }
 
-std::vector<Record> DB::scan(const std::string_view start, const std::string_view end) const
+std::vector<Record> DB::scan(const std::string_view start, const std::string_view end, uint64_t readSeq) const
 {
     std::vector<std::unique_ptr<Iterator>> iterators;
     iterators.push_back(std::make_unique<MemTableIterator>(*activeMemTable_));
@@ -271,6 +271,11 @@ std::vector<Record> DB::scan(const std::string_view start, const std::string_vie
     for (const auto inputPaths = selectScanTables(*manifest_, dataDirectory_, start, end);
          const auto& path : inputPaths)
         iterators.push_back(std::make_unique<SSTableIterator>(path.string()));
+
+    if (readSeq == std::numeric_limits<uint64_t>::max())
+        readSeq = nextSeq_ - 1;
+    std::ranges::for_each(iterators, [&readSeq](std::unique_ptr<Iterator>& iter)
+                          { iter = std::make_unique<SnapshotIterator>(std::move(iter), readSeq); });
 
     auto visibleRecords =
         mergeSorted(iterators) |

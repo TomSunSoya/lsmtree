@@ -25,7 +25,8 @@ class DB
 
     void flush();
     void compact();
-    [[nodiscard]] std::vector<Record> scan(std::string_view start, std::string_view end) const;
+    [[nodiscard]] std::vector<Record> scan(std::string_view start, std::string_view end,
+                                           uint64_t readSeq = std::numeric_limits<uint64_t>::max()) const;
 
     [[nodiscard]] uint64_t getSnapshot() const;
 

@@ -125,6 +125,21 @@ class Iterator
     virtual void advance() = 0;
 };
 
+class SnapshotIterator : public Iterator
+{
+  public:
+    explicit SnapshotIterator(std::unique_ptr<Iterator> iterator, uint64_t readSeq);
+
+    ~SnapshotIterator() override = default;
+    [[nodiscard]] bool valid() const override;
+    [[nodiscard]] const Record& current() const override;
+    void advance() override;
+
+  private:
+    std::unique_ptr<Iterator> iterator_;
+    uint64_t readSeq_;
+};
+
 std::vector<Record> mergeSorted(std::vector<std::unique_ptr<Iterator>>& sources);
 
 // type(1) + seq(8) + keySize(4) + valueSize(4)
