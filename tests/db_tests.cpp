@@ -99,14 +99,14 @@ void expectOneTableInLevelZeroAndOne(const std::filesystem::path& root)
 
 void addTableAtLevel(const std::filesystem::path& root, Manifest& manifest,
                      const std::vector<std::pair<std::string, std::string>>& records, const uint32_t targetLevel,
-                     const std::optional<uint64_t> recordedSize = std::nullopt)
+                     const std::optional<uint64_t> recordedSize = std::nullopt, const uint64_t startSeq = 1)
 {
     const auto tableNumber = manifest.allocateNumber();
     const auto walPath = root / ("fixture_" + std::to_string(tableNumber) + ".wal");
     const auto tablePath = root / "sstable" / ("sst_" + std::to_string(tableNumber) + ".sst");
     std::pair<std::string, std::string> keyRange;
 
-    uint64_t seq = 1;
+    uint64_t seq = startSeq;
     {
         MemTable table(walPath.string());
         for (const auto& [key, value] : records)
@@ -844,6 +844,70 @@ TEST(DBTest, SnapshotGetFallsThroughNewerSSTableToOlderTable)
     }
 }
 
+TEST(DBTest, ActiveSnapshotSurvivesLevelZeroCompaction)
+{
+    const std::filesystem::path root("db_tests_active_snapshot_survives_l0_compaction");
+    const ScopedPathCleanup cleanup(root);
+
+    DB db(root, kManualFlushThreshold);
+    ASSERT_NO_FATAL_FAILURE(expectPut(db, "key", "old"));
+    ASSERT_NO_THROW(db.flush());
+    const uint64_t snapshot = db.getSnapshot();
+
+    ASSERT_NO_FATAL_FAILURE(expectPut(db, "key", "new"));
+    ASSERT_NO_THROW(db.flush());
+    ASSERT_NO_THROW(db.compact());
+
+    ASSERT_NO_FATAL_FAILURE(expectGet(db, "key", snapshot, "old"));
+    ASSERT_NO_FATAL_FAILURE(expectGet(db, "key", "new"));
+}
+
+TEST(DBTest, ReleasingSnapshotAllowsCompactionToDropObsoleteVersion)
+{
+    const std::filesystem::path root("db_tests_released_snapshot_allows_version_gc");
+    const ScopedPathCleanup cleanup(root);
+
+    DB db(root, kManualFlushThreshold);
+    ASSERT_NO_FATAL_FAILURE(expectPut(db, "key", "old"));
+    ASSERT_NO_THROW(db.flush());
+    const uint64_t snapshot = db.getSnapshot();
+
+    ASSERT_NO_FATAL_FAILURE(expectPut(db, "key", "new"));
+    ASSERT_NO_THROW(db.flush());
+    db.releaseSnapshot(snapshot);
+    ASSERT_NO_THROW(db.compact());
+
+    const Manifest manifest(root / "MANIFEST");
+    ASSERT_EQ(1, manifest.level(1).size());
+    SSTableIterator iterator(sstablePath(root, manifest.level(1).front().number));
+    ASSERT_TRUE(iterator.valid());
+    EXPECT_EQ("key", iterator.current().key);
+    EXPECT_EQ("new", iterator.current().value);
+    iterator.advance();
+    EXPECT_FALSE(iterator.valid());
+}
+
+TEST(DBTest, ReleasingOneDuplicateSnapshotKeepsTheOtherSnapshotActive)
+{
+    const std::filesystem::path root("db_tests_duplicate_snapshot_reference_count");
+    const ScopedPathCleanup cleanup(root);
+
+    DB db(root, kManualFlushThreshold);
+    ASSERT_NO_FATAL_FAILURE(expectPut(db, "key", "old"));
+    ASSERT_NO_THROW(db.flush());
+    const uint64_t firstSnapshot = db.getSnapshot();
+    const uint64_t secondSnapshot = db.getSnapshot();
+    ASSERT_EQ(firstSnapshot, secondSnapshot);
+
+    ASSERT_NO_FATAL_FAILURE(expectPut(db, "key", "new"));
+    ASSERT_NO_THROW(db.flush());
+    db.releaseSnapshot(firstSnapshot);
+    ASSERT_NO_THROW(db.compact());
+
+    ASSERT_NO_FATAL_FAILURE(expectGet(db, "key", secondSnapshot, "old"));
+    ASSERT_NO_FATAL_FAILURE(expectGet(db, "key", "new"));
+}
+
 TEST(DBTest, CompactPersistsMergedTableAcrossReopen)
 {
     const std::filesystem::path root("db_tests_compact_persists_manifest");
@@ -1556,8 +1620,9 @@ TEST(DBTest, LevelCompactionMergesOnlyNextLevelTablesThatOverlapAtInclusiveBound
     uint64_t disjointNumber = 0;
     {
         Manifest manifest(root / "MANIFEST");
+        // The level-1 records shadow same-keyed level-2 records, so they must carry newer sequence numbers.
         ASSERT_NO_FATAL_FAILURE(
-            addTableAtLevel(root, manifest, {{"cc", "new-cc"}, {"ee", "new-ee"}}, 1, 10 * baseBudget + 1));
+            addTableAtLevel(root, manifest, {{"cc", "new-cc"}, {"ee", "new-ee"}}, 1, 10 * baseBudget + 1, 10));
         ASSERT_NO_FATAL_FAILURE(addTableAtLevel(root, manifest, {{"aa", "old-aa"}, {"cc", "old-cc"}}, 2, 1));
         ASSERT_NO_FATAL_FAILURE(addTableAtLevel(root, manifest, {{"ee", "old-ee"}, {"gg", "old-gg"}}, 2, 1));
         ASSERT_NO_FATAL_FAILURE(addTableAtLevel(root, manifest, {{"xx", "old-xx"}, {"zz", "old-zz"}}, 2, 1));

@@ -1,5 +1,6 @@
 #include "utils.h"
 
+#include <algorithm>
 #include <cerrno>
 #include <cstdio>
 #include <fcntl.h>
@@ -16,12 +17,13 @@ struct MergeItem
 {
     std::string key;
     int sourceIndex;
+    uint64_t seq;
 
     bool operator<(const MergeItem& other) const
     {
         if (key != other.key)
             return key > other.key;
-        return sourceIndex > other.sourceIndex;
+        return seq < other.seq;
     }
 };
 
@@ -29,7 +31,7 @@ void enqueueCurrent(std::priority_queue<MergeItem>& queue, const std::vector<std
                     int index)
 {
     if (sources[index] && sources[index]->valid())
-        queue.emplace(sources[index]->current().key, index);
+        queue.emplace(sources[index]->current().key, index, sources[index]->current().seq);
 }
 } // namespace
 
@@ -209,8 +211,10 @@ void SnapshotIterator::advance()
         iterator_->advance();
 }
 
-std::vector<Record> mergeSorted(std::vector<std::unique_ptr<Iterator>>& sources)
+std::vector<Record> mergeAll(std::vector<std::unique_ptr<Iterator>>& sources)
 {
+    if (sources.empty())
+        return {};
     std::priority_queue<MergeItem> queue;
     for (int index = 0; index < sources.size(); ++index)
         enqueueCurrent(queue, sources, index);
@@ -221,24 +225,49 @@ std::vector<Record> mergeSorted(std::vector<std::unique_ptr<Iterator>>& sources)
         const MergeItem winner = queue.top();
         queue.pop();
 
-        while (!queue.empty() && queue.top().key == winner.key)
-        {
-            const int shadowedIndex = queue.top().sourceIndex;
-            queue.pop();
-
-            sources[shadowedIndex]->advance();
-            enqueueCurrent(queue, sources, shadowedIndex);
-        }
-
-        auto& winningSource = sources[winner.sourceIndex];
-        result.push_back(winningSource->current());
-        winningSource->advance();
-
-        while (winningSource->valid() && winningSource->current().key == winner.key)
-            winningSource->advance();
-
+        auto& source = sources[winner.sourceIndex];
+        result.push_back(source->current());
+        source->advance();
         enqueueCurrent(queue, sources, winner.sourceIndex);
     }
-
     return result;
+}
+
+void latestVisiblePerKey(std::vector<Record>& records)
+{
+    if (records.empty())
+        return;
+    records.erase(std::ranges::unique(records, [](auto& a, auto& b) { return a.key == b.key; }).begin(), records.end());
+    std::erase_if(records, [](const Record& record) { return record.type == Type::TOMBSTONE; });
+}
+
+void retainForCompaction(std::vector<Record>& records, const uint64_t Smin)
+{
+    if (records.empty())
+        return;
+
+    std::vector<Record> result;
+    result.swap(records);
+    std::string curKey = result.front().key;
+    bool flag = false;
+    auto it = result.begin();
+    while (it != result.end())
+    {
+        if (curKey == it->key)
+        {
+            if (it->seq > Smin)
+                records.push_back(*it);
+            else if (!flag)
+            {
+                records.push_back(*it);
+                flag = true;
+            }
+            ++it;
+        }
+        else
+        {
+            curKey = it->key;
+            flag = false;
+        }
+    }
 }

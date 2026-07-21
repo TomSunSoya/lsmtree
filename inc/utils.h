@@ -140,7 +140,10 @@ class SnapshotIterator : public Iterator
     uint64_t readSeq_;
 };
 
-std::vector<Record> mergeSorted(std::vector<std::unique_ptr<Iterator>>& sources);
+std::vector<Record> mergeAll(std::vector<std::unique_ptr<Iterator>>& sources);
+
+void latestVisiblePerKey(std::vector<Record>& records);
+void retainForCompaction(std::vector<Record>& records, uint64_t Smin);
 
 // type(1) + seq(8) + keySize(4) + valueSize(4)
 constexpr uint64_t kEncodedRecordHeaderSize = sizeof(uint8_t) + 2 * sizeof(uint32_t) + sizeof(uint64_t);

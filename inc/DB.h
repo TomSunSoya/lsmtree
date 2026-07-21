@@ -29,6 +29,7 @@ class DB
                                            uint64_t readSeq = std::numeric_limits<uint64_t>::max()) const;
 
     [[nodiscard]] uint64_t getSnapshot() const;
+    void releaseSnapshot(uint64_t seq);
 
   private:
     bool searchSSTables(std::string_view key, uint64_t readSeq, std::string& value) const;
@@ -40,6 +41,7 @@ class DB
     uint64_t budgetFor(uint64_t n) const;
     std::optional<uint64_t> getFirstOverLevel() const;
     void getNextCrossTable(std::vector<TableMeta>& tables, uint64_t nextLevel) const;
+    uint64_t smallestActiveSnapShot() const;
 
     std::unique_ptr<MemTable> activeMemTable_;
     std::filesystem::path dataDirectory_;
@@ -52,4 +54,5 @@ class DB
     std::unordered_map<uint64_t, std::string> cursors_;
     mutable std::unordered_map<uint64_t, std::unique_ptr<SSTable>> tables_{};
     uint64_t nextSeq_{};
+    mutable std::multiset<uint64_t> compactSeqs_{};
 };

@@ -277,14 +277,26 @@ std::vector<Record> DB::scan(const std::string_view start, const std::string_vie
     std::ranges::for_each(iterators, [&readSeq](std::unique_ptr<Iterator>& iter)
                           { iter = std::make_unique<SnapshotIterator>(std::move(iter), readSeq); });
 
+    auto result = mergeAll(iterators);
+    latestVisiblePerKey(result);
     auto visibleRecords =
-        mergeSorted(iterators) |
-        std::views::filter([start, end](const Record& record)
-                           { return record.key >= start && record.key < end && record.type == Type::VALUE; });
+        result | std::views::filter([start, end](const Record& record)
+                                    { return record.key >= start && record.key < end && record.type == Type::VALUE; });
     return std::ranges::to<std::vector>(visibleRecords);
 }
 
-uint64_t DB::getSnapshot() const { return nextSeq_ - 1; }
+uint64_t DB::getSnapshot() const
+{
+    compactSeqs_.insert(nextSeq_ - 1);
+    return nextSeq_ - 1;
+}
+
+void DB::releaseSnapshot(const uint64_t seq)
+{
+    auto it = compactSeqs_.find(seq);
+    if (it != compactSeqs_.end())
+        compactSeqs_.erase(it);
+}
 
 Result DB::searchTable(const uint64_t tableNumber, const std::string_view key, const uint64_t readSeq,
                        std::string& value) const
@@ -338,7 +350,8 @@ void DB::compactLevel0()
     const std::vector<std::filesystem::path> inputPaths = tablePaths(dataDirectory_, selectedTables);
 
     auto iterators = openTableIterators(inputPaths);
-    std::vector<Record> records = mergeSorted(iterators);
+    std::vector<Record> records = mergeAll(iterators);
+    retainForCompaction(records, smallestActiveSnapShot());
     const std::vector<TableMeta> outputTables =
         writeCompactionOutput(*manifest_, dataDirectory_, std::span(records), compactionSliceBytes_);
 
@@ -396,7 +409,9 @@ void DB::compactLevel(uint64_t n)
 
     const std::vector<std::filesystem::path> inputPaths = tablePaths(dataDirectory_, selectedTables);
     auto iterators = openTableIterators(inputPaths);
-    std::vector<Record> records = mergeSorted(iterators);
+
+    std::vector<Record> records = mergeAll(iterators);
+    retainForCompaction(records, smallestActiveSnapShot());
     const std::vector<TableMeta> outputTables =
         writeCompactionOutput(*manifest_, dataDirectory_, std::span(records), compactionSliceBytes_);
 
@@ -451,3 +466,5 @@ void DB::getNextCrossTable(std::vector<TableMeta>& tables, const uint64_t nextLe
             tables.push_back(table);
     }
 }
+
+uint64_t DB::smallestActiveSnapShot() const { return compactSeqs_.empty() ? nextSeq_ - 1 : *compactSeqs_.begin(); }

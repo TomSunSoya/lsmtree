@@ -92,22 +92,22 @@ TEST(SnapshotIteratorTest, ConstructorSkipsInvisibleKeyAndPositionsAtNextVisible
     EXPECT_EQ(50, iterator.current().seq);
 }
 
-TEST(MergeSortedTest, EmptyAndNullSourcesProduceNoRecords)
+TEST(MergeAllTest, EmptyAndNullSourcesProduceNoRecords)
 {
     std::vector<std::unique_ptr<Iterator>> sources;
     sources.push_back(nullptr);
     sources.push_back(source({}));
 
-    EXPECT_TRUE(mergeSorted(sources).empty());
+    EXPECT_TRUE(mergeAll(sources).empty());
 }
 
-TEST(MergeSortedTest, MergesDisjointSourcesInKeyOrder)
+TEST(MergeAllTest, MergesDisjointSourcesInKeyOrder)
 {
     std::vector<std::unique_ptr<Iterator>> sources;
     sources.push_back(source({value("beta", "two"), value("delta", "four")}));
     sources.push_back(source({value("alpha", "one"), value("gamma", "three")}));
 
-    const auto merged = mergeSorted(sources);
+    const auto merged = mergeAll(sources);
 
     expectRecords(merged, {
                               value("alpha", "one"),
@@ -117,36 +117,96 @@ TEST(MergeSortedTest, MergesDisjointSourcesInKeyOrder)
                           });
 }
 
-TEST(MergeSortedTest, EarlierSourceWinsDuplicateAndLaterSourceContinues)
+TEST(MergeAllTest, PreservesEveryVersionInDescendingSequenceOrderWithinKey)
 {
     std::vector<std::unique_ptr<Iterator>> sources;
-    sources.push_back(source({value("alpha", "new", 30), value("gamma", "new-gamma", 50)}));
     sources.push_back(source({
-        value("alpha", "old", 20),
+        value("alpha", "middle", 50),
+        value("alpha", "oldest", 10),
+        value("gamma", "gamma", 50),
+    }));
+    sources.push_back(source({
+        value("alpha", "newest", 90),
         value("beta", "kept", 25),
         value("delta", "also-kept", 40),
     }));
 
-    const auto merged = mergeSorted(sources);
+    const auto merged = mergeAll(sources);
 
     expectRecords(merged, {
-                              value("alpha", "new", 30),
+                              value("alpha", "newest", 90),
+                              value("alpha", "middle", 50),
+                              value("alpha", "oldest", 10),
                               value("beta", "kept", 25),
                               value("delta", "also-kept", 40),
-                              value("gamma", "new-gamma", 50),
+                              value("gamma", "gamma", 50),
                           });
 }
 
-TEST(MergeSortedTest, KeepsTombstoneFromWinningSource)
+TEST(MergeAllTest, PreservesTombstonesAndShadowedValues)
 {
     std::vector<std::unique_ptr<Iterator>> sources;
     sources.push_back(source({tombstone("alpha", 9)}));
     sources.push_back(source({value("alpha", "old"), value("beta", "kept")}));
 
-    const auto merged = mergeSorted(sources);
+    const auto merged = mergeAll(sources);
 
     expectRecords(merged, {
                               tombstone("alpha", 9),
+                              value("alpha", "old"),
                               value("beta", "kept"),
                           });
+}
+
+TEST(LatestVisiblePerKeyTest, KeepsNewestValueAndDropsKeyHiddenByNewestTombstone)
+{
+    std::vector<Record> records{
+        value("alpha", "new", 30), value("alpha", "old", 20), value("beta", "deleted", 40), tombstone("beta", 35),
+        value("gamma", "new", 50), tombstone("gamma", 45),    tombstone("hidden", 60),      value("hidden", "old", 10),
+    };
+
+    latestVisiblePerKey(records);
+
+    expectRecords(records, {
+                               value("alpha", "new", 30),
+                               value("beta", "deleted", 40),
+                               value("gamma", "new", 50),
+                           });
+}
+
+TEST(RetainForCompactionTest, KeepsVersionsNewerThanOldestSnapshotAndOneBoundaryVersionPerKey)
+{
+    std::vector<Record> records{
+        value("alpha", "90", 90), value("alpha", "70", 70), value("alpha", "50", 50),
+        value("alpha", "10", 10), tombstone("beta", 80),    value("beta", "60", 60),
+        value("beta", "20", 20),  value("gamma", "40", 40), value("gamma", "30", 30),
+    };
+
+    retainForCompaction(records, 60);
+
+    expectRecords(records, {
+                               value("alpha", "90", 90),
+                               value("alpha", "70", 70),
+                               value("alpha", "50", 50),
+                               tombstone("beta", 80),
+                               value("beta", "60", 60),
+                               value("gamma", "40", 40),
+                           });
+}
+
+TEST(RetainForCompactionTest, KeepsOnlyNewestVersionPerKeyWhenNoSnapshotNeedsHistory)
+{
+    std::vector<Record> records{
+        value("alpha", "new", 90),
+        value("alpha", "old", 50),
+        tombstone("beta", 80),
+        value("beta", "old", 40),
+    };
+
+    retainForCompaction(records, 100);
+
+    expectRecords(records, {
+                               value("alpha", "new", 90),
+                               tombstone("beta", 80),
+                           });
 }
