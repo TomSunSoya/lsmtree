@@ -38,9 +38,9 @@ class DB
   private:
     bool searchSSTables(std::string_view key, uint64_t readSeq, std::string& value) const;
     Result searchTable(uint64_t tableNumber, std::string_view key, uint64_t readSeq, std::string& value) const;
-    void compactLevel0();
     void maybeCompact();
     void compactLevel(uint64_t n);
+    void compactRange(const std::vector<uint64_t>& removedTables, uint64_t targetLevel);
     uint64_t levelBytes(uint64_t level) const;
     uint64_t budgetFor(uint64_t n) const;
     std::optional<uint64_t> getFirstOverLevel() const;
