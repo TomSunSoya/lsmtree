@@ -782,10 +782,10 @@ TEST(DBTest, SnapshotGetReadsValueVisibleAtSnapshot)
         DB db(root, kManualFlushThreshold);
 
         ASSERT_NO_FATAL_FAILURE(expectPut(db, "key", "old"));
-        const uint64_t snapshot = db.getSnapshot();
+        const Snapshot snapshot = db.snapshot();
         ASSERT_NO_FATAL_FAILURE(expectPut(db, "key", "new"));
 
-        ASSERT_NO_FATAL_FAILURE(expectGet(db, "key", snapshot, "old"));
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "key", snapshot.seq(), "old"));
         ASSERT_NO_FATAL_FAILURE(expectGet(db, "key", "new"));
     }
 }
@@ -798,10 +798,10 @@ TEST(DBTest, SnapshotTakenBeforePutDoesNotSeeNewValue)
     {
         DB db(root, kManualFlushThreshold);
 
-        const uint64_t snapshot = db.getSnapshot();
+        const Snapshot snapshot = db.snapshot();
         ASSERT_NO_FATAL_FAILURE(expectPut(db, "key", "new"));
 
-        ASSERT_NO_FATAL_FAILURE(expectMissing(db, "key", snapshot));
+        ASSERT_NO_FATAL_FAILURE(expectMissing(db, "key", snapshot.seq()));
         ASSERT_NO_FATAL_FAILURE(expectGet(db, "key", "new"));
     }
 }
@@ -815,10 +815,10 @@ TEST(DBTest, SnapshotGetDoesNotSeeTombstoneWrittenAfterSnapshot)
         DB db(root, kManualFlushThreshold);
 
         ASSERT_NO_FATAL_FAILURE(expectPut(db, "key", "old"));
-        const uint64_t snapshot = db.getSnapshot();
+        const Snapshot snapshot = db.snapshot();
         ASSERT_NO_FATAL_FAILURE(expectRemove(db, "key"));
 
-        ASSERT_NO_FATAL_FAILURE(expectGet(db, "key", snapshot, "old"));
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "key", snapshot.seq(), "old"));
         expectMissing(db, "key");
     }
 }
@@ -834,12 +834,12 @@ TEST(DBTest, SnapshotGetFallsThroughNewerSSTableToOlderTable)
         ASSERT_NO_FATAL_FAILURE(expectPut(db, "key", "old"));
         ASSERT_NO_THROW(db.flush());
 
-        const uint64_t snapshot = db.getSnapshot();
+        const Snapshot snapshot = db.snapshot();
 
         ASSERT_NO_FATAL_FAILURE(expectPut(db, "key", "new"));
         ASSERT_NO_THROW(db.flush());
 
-        ASSERT_NO_FATAL_FAILURE(expectGet(db, "key", snapshot, "old"));
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "key", snapshot.seq(), "old"));
         ASSERT_NO_FATAL_FAILURE(expectGet(db, "key", "new"));
     }
 }
@@ -852,29 +852,54 @@ TEST(DBTest, ActiveSnapshotSurvivesLevelZeroCompaction)
     DB db(root, kManualFlushThreshold);
     ASSERT_NO_FATAL_FAILURE(expectPut(db, "key", "old"));
     ASSERT_NO_THROW(db.flush());
-    const uint64_t snapshot = db.getSnapshot();
+    const Snapshot snapshot = db.snapshot();
 
     ASSERT_NO_FATAL_FAILURE(expectPut(db, "key", "new"));
     ASSERT_NO_THROW(db.flush());
     ASSERT_NO_THROW(db.compact());
 
-    ASSERT_NO_FATAL_FAILURE(expectGet(db, "key", snapshot, "old"));
+    ASSERT_NO_FATAL_FAILURE(expectGet(db, "key", snapshot.seq(), "old"));
     ASSERT_NO_FATAL_FAILURE(expectGet(db, "key", "new"));
 }
 
-TEST(DBTest, ReleasingSnapshotAllowsCompactionToDropObsoleteVersion)
+TEST(DBTest, DestroyingOneDuplicateSnapshotKeepsTheOtherSnapshotActive)
 {
-    const std::filesystem::path root("db_tests_released_snapshot_allows_version_gc");
+    const std::filesystem::path root("db_tests_duplicate_snapshot_reference_count");
     const ScopedPathCleanup cleanup(root);
 
     DB db(root, kManualFlushThreshold);
     ASSERT_NO_FATAL_FAILURE(expectPut(db, "key", "old"));
     ASSERT_NO_THROW(db.flush());
-    const uint64_t snapshot = db.getSnapshot();
+
+    const Snapshot surviving = db.snapshot();
+    {
+        const Snapshot dropped = db.snapshot();
+        ASSERT_EQ(surviving.seq(), dropped.seq());
+    }
 
     ASSERT_NO_FATAL_FAILURE(expectPut(db, "key", "new"));
     ASSERT_NO_THROW(db.flush());
-    db.releaseSnapshot(snapshot);
+    ASSERT_NO_THROW(db.compact());
+
+    ASSERT_NO_FATAL_FAILURE(expectGet(db, "key", surviving.seq(), "old"));
+    ASSERT_NO_FATAL_FAILURE(expectGet(db, "key", "new"));
+}
+
+TEST(DBTest, DestroyingRaiiSnapshotAllowsCompactionToDropObsoleteVersion)
+{
+    const std::filesystem::path root("db_tests_destroyed_raii_snapshot_allows_version_gc");
+    const ScopedPathCleanup cleanup(root);
+
+    DB db(root, kManualFlushThreshold);
+    ASSERT_NO_FATAL_FAILURE(expectPut(db, "key", "old"));
+    ASSERT_NO_THROW(db.flush());
+
+    {
+        const Snapshot snapshot = db.snapshot();
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "key", "new"));
+        ASSERT_NO_THROW(db.flush());
+    }
+
     ASSERT_NO_THROW(db.compact());
 
     const Manifest manifest(root / "MANIFEST");
@@ -887,25 +912,53 @@ TEST(DBTest, ReleasingSnapshotAllowsCompactionToDropObsoleteVersion)
     EXPECT_FALSE(iterator.valid());
 }
 
-TEST(DBTest, ReleasingOneDuplicateSnapshotKeepsTheOtherSnapshotActive)
+TEST(DBTest, RaiiSnapshotRegistersUntilEndOfScope)
 {
-    const std::filesystem::path root("db_tests_duplicate_snapshot_reference_count");
+    const std::filesystem::path root("db_tests_raii_snapshot_scope_accounting");
     const ScopedPathCleanup cleanup(root);
 
     DB db(root, kManualFlushThreshold);
-    ASSERT_NO_FATAL_FAILURE(expectPut(db, "key", "old"));
-    ASSERT_NO_THROW(db.flush());
-    const uint64_t firstSnapshot = db.getSnapshot();
-    const uint64_t secondSnapshot = db.getSnapshot();
-    ASSERT_EQ(firstSnapshot, secondSnapshot);
+    EXPECT_EQ(0, db.activeSnapshotCount());
+    {
+        const Snapshot snapshot = db.snapshot();
+        EXPECT_EQ(1, db.activeSnapshotCount());
+    }
+    EXPECT_EQ(0, db.activeSnapshotCount());
+}
 
-    ASSERT_NO_FATAL_FAILURE(expectPut(db, "key", "new"));
-    ASSERT_NO_THROW(db.flush());
-    db.releaseSnapshot(firstSnapshot);
-    ASSERT_NO_THROW(db.compact());
+TEST(DBTest, MoveConstructedSnapshotDoesNotDoubleRelease)
+{
+    const std::filesystem::path root("db_tests_move_constructed_snapshot_no_double_release");
+    const ScopedPathCleanup cleanup(root);
 
-    ASSERT_NO_FATAL_FAILURE(expectGet(db, "key", secondSnapshot, "old"));
-    ASSERT_NO_FATAL_FAILURE(expectGet(db, "key", "new"));
+    DB db(root, kManualFlushThreshold);
+    // A bystander snapshot at the same seq makes a wrong release eat a live share instead of no-oping.
+    const Snapshot keep = db.snapshot();
+    {
+        Snapshot a = db.snapshot();
+        const Snapshot b = std::move(a);
+        EXPECT_EQ(2, db.activeSnapshotCount());
+    }
+    EXPECT_EQ(1, db.activeSnapshotCount());
+}
+
+TEST(DBTest, MoveAssignedSnapshotReleasesReplacedRegistration)
+{
+    const std::filesystem::path root("db_tests_move_assigned_snapshot_releases_replaced");
+    const ScopedPathCleanup cleanup(root);
+
+    DB db(root, kManualFlushThreshold);
+    // Same setup as the move-construct case: the bystander share must survive the assignment accounting.
+    const Snapshot keep = db.snapshot();
+    {
+        Snapshot a = db.snapshot();
+        Snapshot b = db.snapshot();
+        EXPECT_EQ(3, db.activeSnapshotCount());
+
+        a = std::move(b);
+        EXPECT_EQ(2, db.activeSnapshotCount());
+    }
+    EXPECT_EQ(1, db.activeSnapshotCount());
 }
 
 TEST(DBTest, CompactPersistsMergedTableAcrossReopen)
@@ -1777,13 +1830,13 @@ TEST(DBTest, SnapshotScanReadsVisibleVersionsFromActiveMemTable)
     DB db(root, kManualFlushThreshold);
     ASSERT_NO_FATAL_FAILURE(expectPut(db, "alpha", "old"));
     ASSERT_NO_FATAL_FAILURE(expectPut(db, "deleted", "visible"));
-    const uint64_t snapshot = db.getSnapshot();
+    const Snapshot snapshot = db.snapshot();
 
     ASSERT_NO_FATAL_FAILURE(expectPut(db, "alpha", "new"));
     ASSERT_NO_FATAL_FAILURE(expectRemove(db, "deleted"));
     ASSERT_NO_FATAL_FAILURE(expectPut(db, "fresh", "new-value"));
 
-    ASSERT_NO_FATAL_FAILURE(expectScanValues(db, "", "~", snapshot,
+    ASSERT_NO_FATAL_FAILURE(expectScanValues(db, "", "~", snapshot.seq(),
                                              {
                                                  {"alpha", "old"},
                                                  {"deleted", "visible"},
@@ -1802,10 +1855,10 @@ TEST(DBTest, SnapshotScanIgnoresTombstoneWrittenAfterSnapshot)
 
     DB db(root, kManualFlushThreshold);
     ASSERT_NO_FATAL_FAILURE(expectPut(db, "k", "v"));
-    const uint64_t snapshot = db.getSnapshot();
+    const Snapshot snapshot = db.snapshot();
     ASSERT_NO_FATAL_FAILURE(expectRemove(db, "k"));
 
-    ASSERT_NO_FATAL_FAILURE(expectScanValues(db, "", "~", snapshot, {{"k", "v"}}));
+    ASSERT_NO_FATAL_FAILURE(expectScanValues(db, "", "~", snapshot.seq(), {{"k", "v"}}));
     ASSERT_NO_FATAL_FAILURE(expectScanValues(db, "", "~", {}));
 }
 
@@ -1818,14 +1871,14 @@ TEST(DBTest, SnapshotScanFallsBackToOlderSSTableWhenNewerTableIsInvisible)
     ASSERT_NO_FATAL_FAILURE(expectPut(db, "alpha", "old"));
     ASSERT_NO_FATAL_FAILURE(expectPut(db, "deleted", "visible"));
     ASSERT_NO_THROW(db.flush());
-    const uint64_t snapshot = db.getSnapshot();
+    const Snapshot snapshot = db.snapshot();
 
     ASSERT_NO_FATAL_FAILURE(expectPut(db, "alpha", "new"));
     ASSERT_NO_FATAL_FAILURE(expectRemove(db, "deleted"));
     ASSERT_NO_FATAL_FAILURE(expectPut(db, "fresh", "new-value"));
     ASSERT_NO_THROW(db.flush());
 
-    ASSERT_NO_FATAL_FAILURE(expectScanValues(db, "", "~", snapshot,
+    ASSERT_NO_FATAL_FAILURE(expectScanValues(db, "", "~", snapshot.seq(),
                                              {
                                                  {"alpha", "old"},
                                                  {"deleted", "visible"},

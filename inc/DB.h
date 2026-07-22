@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <filesystem>
 #include <memory>
 #include <string>
@@ -10,6 +11,8 @@
 #include "Manifest.h"
 #include "MemTable.h"
 #include "SSTable.h"
+
+class Snapshot;
 
 class DB
 {
@@ -28,8 +31,9 @@ class DB
     [[nodiscard]] std::vector<Record> scan(std::string_view start, std::string_view end,
                                            uint64_t readSeq = std::numeric_limits<uint64_t>::max()) const;
 
-    [[nodiscard]] uint64_t getSnapshot() const;
-    void releaseSnapshot(uint64_t seq);
+    Snapshot snapshot();
+
+    [[nodiscard]] size_t activeSnapshotCount() const;
 
   private:
     bool searchSSTables(std::string_view key, uint64_t readSeq, std::string& value) const;
@@ -42,6 +46,8 @@ class DB
     std::optional<uint64_t> getFirstOverLevel() const;
     void getNextCrossTable(std::vector<TableMeta>& tables, uint64_t nextLevel) const;
     uint64_t smallestActiveSnapShot() const;
+    [[nodiscard]] uint64_t getSnapshot() const;
+    void releaseSnapshot(uint64_t seq);
 
     std::unique_ptr<MemTable> activeMemTable_;
     std::filesystem::path dataDirectory_;
@@ -55,4 +61,25 @@ class DB
     mutable std::unordered_map<uint64_t, std::unique_ptr<SSTable>> tables_{};
     uint64_t nextSeq_{};
     mutable std::multiset<uint64_t> compactSeqs_{};
+
+    friend class Snapshot;
+};
+
+class Snapshot
+{
+  public:
+    Snapshot(const Snapshot&) = delete;
+    Snapshot& operator=(const Snapshot&) = delete;
+    Snapshot(Snapshot&& other) noexcept;
+    Snapshot& operator=(Snapshot&& other) noexcept;
+    ~Snapshot();
+
+    [[nodiscard]] uint64_t seq() const;
+
+  private:
+    friend class DB;
+    Snapshot(DB* db, uint64_t seq);
+
+    DB* db_;
+    uint64_t seq_;
 };

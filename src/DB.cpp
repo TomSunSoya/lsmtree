@@ -298,6 +298,10 @@ void DB::releaseSnapshot(const uint64_t seq)
         compactSeqs_.erase(it);
 }
 
+Snapshot DB::snapshot() { return {this, getSnapshot()}; }
+
+size_t DB::activeSnapshotCount() const { return compactSeqs_.size(); }
+
 Result DB::searchTable(const uint64_t tableNumber, const std::string_view key, const uint64_t readSeq,
                        std::string& value) const
 {
@@ -468,3 +472,32 @@ void DB::getNextCrossTable(std::vector<TableMeta>& tables, const uint64_t nextLe
 }
 
 uint64_t DB::smallestActiveSnapShot() const { return compactSeqs_.empty() ? nextSeq_ - 1 : *compactSeqs_.begin(); }
+
+Snapshot::Snapshot(Snapshot&& other) noexcept
+{
+    db_ = other.db_;
+    seq_ = other.seq_;
+    other.db_ = nullptr;
+}
+
+Snapshot& Snapshot::operator=(Snapshot&& other) noexcept
+{
+    if (&other == this)
+        return *this;
+    if (db_)
+        db_->releaseSnapshot(seq_);
+    db_ = other.db_;
+    seq_ = other.seq_;
+    other.db_ = nullptr;
+    return *this;
+}
+
+Snapshot::~Snapshot()
+{
+    if (db_)
+        db_->releaseSnapshot(seq_);
+}
+
+uint64_t Snapshot::seq() const { return seq_; }
+
+Snapshot::Snapshot(DB* db, const uint64_t seq) : db_(db), seq_(seq) {}
