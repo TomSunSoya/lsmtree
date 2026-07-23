@@ -12,6 +12,9 @@
 
 namespace
 {
+constexpr std::string_view MAGIC{"LWAL", 4};
+constexpr uint8_t VERSION = 1;
+constexpr size_t kMagicSize = 4;
 std::string encodeWALRecord(const std::string& key, const uint64_t seq, const std::string& value, const Type type)
 {
     const std::string operation = type == Type::VALUE ? "P," : "D,";
@@ -104,7 +107,7 @@ class WALParser
     }
 
     std::string_view content_;
-    size_t position_ = 0;
+    size_t position_ = kMagicSize + 1;
 };
 } // namespace
 
@@ -172,10 +175,20 @@ MemTable::WALFileWriter::WALFileWriter(const std::string_view logPath) : path_(l
             throw std::runtime_error("Failed to create directory");
         }
     }
-
-    fileDescriptor_ = ::open(path_.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0664);
+    fileDescriptor_ = ::open(path_.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_APPEND, 0644);
     if (fileDescriptor_ < 0)
-        throw std::runtime_error("Failed to open file for writing");
+    {
+        if (errno != EEXIST)
+            throw std::system_error(errno, std::system_category(), "open failed");
+        fileDescriptor_ = ::open(path_.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0664);
+    }
+    else
+    {
+        writeAll(fileDescriptor_, MAGIC.data(), MAGIC.size());
+        writeAll(fileDescriptor_, &VERSION, sizeof(VERSION));
+        if (::fsync(fileDescriptor_))
+            throw std::system_error(errno, std::system_category(), "fsync WAL head failed");
+    }
 }
 
 MemTable::WALFileWriter::~WALFileWriter() { ::close(fileDescriptor_); }
@@ -185,8 +198,8 @@ void MemTable::WALFileWriter::write(const std::string& record)
     if (poisoned_)
         throw std::runtime_error("File is poisoned");
 
-    const ssize_t bytesWritten = ::write(fileDescriptor_, record.c_str(), record.size());
-    if (bytesWritten < 0 || static_cast<size_t>(bytesWritten) != record.size())
+    if (const ssize_t bytesWritten = ::write(fileDescriptor_, record.c_str(), record.size());
+        bytesWritten < 0 || static_cast<size_t>(bytesWritten) != record.size())
     {
         poisoned_ = true;
         const int error = errno;
@@ -224,15 +237,23 @@ bool MemTable::appendToWAL(const std::string& key, const uint64_t seq, const std
 
 bool MemTable::restoreFromWAL()
 {
-    std::ifstream input(logPath_);
+    std::ifstream input(logPath_, std::ios::binary);
     if (!input)
         return false;
 
     std::stringstream contentBuffer;
     contentBuffer << input.rdbuf();
     const std::string content = contentBuffer.str();
+    if (content.size() < 5)
+        throw std::runtime_error("Invalid WAL file format");
 
-    size_t lastGoodOffset = 0;
+    if (content.compare(0, kMagicSize, MAGIC))
+        throw std::runtime_error("Invalid WAL file format");
+
+    if (const auto version = static_cast<uint8_t>(content[kMagicSize]); version != VERSION)
+        throw std::runtime_error("Invalid WAL file format");
+
+    size_t lastGoodOffset = kMagicSize + 1;
     for (const auto& [key, entry] : parseWALRecords(content, lastGoodOffset))
     {
         table_.emplace(Key{key, entry.seq}, entry);
