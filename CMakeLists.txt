@@ -7,6 +7,7 @@ include(cmake/Format.cmake)
 add_library(lsmtree_lib
         src/BloomFilter.cpp
         src/DB.cpp
+        src/FaultInjection.cpp
         src/Manifest.cpp
         src/MemTable.cpp
         src/SSTable.cpp
@@ -40,3 +41,4 @@ add_lsmtree_test(manifest_tests tests/manifest_tests.cpp)
 add_lsmtree_test(db_tests tests/db_tests.cpp)
 add_lsmtree_test(bloom_filter_tests tests/bloom_filter_tests.cpp)
 add_lsmtree_test(utils_tests tests/utils_tests.cpp)
+add_lsmtree_test(fault_injection_tests tests/fault_injection_tests.cpp)

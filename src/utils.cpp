@@ -1,5 +1,7 @@
 #include "utils.h"
 
+#include "FaultInjection.h"
+
 #include <algorithm>
 #include <cerrno>
 #include <cstdio>
@@ -85,7 +87,7 @@ void writeAll(const int fd, const void* data, std::size_t size)
     auto* position = static_cast<const char*>(data);
     while (size > 0)
     {
-        const ssize_t written = ::write(fd, position, size);
+        const ssize_t written = fault::write(fd, position, size);
         if (written < 0)
         {
             if (errno == EINTR)
@@ -171,7 +173,7 @@ uint64_t FileWriter::add(const Record& record)
 
 void FileWriter::finish()
 {
-    if (::fsync(dataFile_.get()))
+    if (fault::fsync(dataFile_.get()))
         throw std::runtime_error("Failed to fsync table!");
 
     dataFile_.close();
@@ -186,7 +188,7 @@ void FileWriter::finish()
         throw std::runtime_error("Failed to open dir for reading!");
 
     FdGuard directory(directoryDescriptor);
-    if (::fsync(directory.get()))
+    if (fault::fsync(directory.get()))
         throw std::runtime_error("Failed to fsync dir!");
     directory.close();
 }

@@ -1,5 +1,7 @@
 #include "MemTable.h"
 
+#include "FaultInjection.h"
+
 #include <cassert>
 #include <cerrno>
 #include <fcntl.h>
@@ -217,7 +219,7 @@ MemTable::WALFileWriter::WALFileWriter(const std::string_view logPath) : path_(l
     {
         writeAll(fileDescriptor_, MAGIC.data(), MAGIC.size());
         writeAll(fileDescriptor_, &VERSION, sizeof(VERSION));
-        if (::fsync(fileDescriptor_))
+        if (fault::fsync(fileDescriptor_))
             throw std::system_error(errno, std::system_category(), "fsync WAL head failed");
     }
 }
@@ -229,7 +231,7 @@ void MemTable::WALFileWriter::write(const std::string& record)
     if (poisoned_)
         throw std::runtime_error("File is poisoned");
 
-    if (const ssize_t bytesWritten = ::write(fileDescriptor_, record.c_str(), record.size());
+    if (const ssize_t bytesWritten = fault::write(fileDescriptor_, record.c_str(), record.size());
         bytesWritten < 0 || static_cast<size_t>(bytesWritten) != record.size())
     {
         poisoned_ = true;
@@ -237,7 +239,7 @@ void MemTable::WALFileWriter::write(const std::string& record)
         throw std::system_error(error, std::system_category(), "write failed");
     }
 
-    if (::fsync(fileDescriptor_))
+    if (fault::fsync(fileDescriptor_))
     {
         poisoned_ = true;
         const int error = errno;
