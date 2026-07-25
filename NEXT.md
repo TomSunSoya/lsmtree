@@ -1,1 +1,1 @@
-# 修复 WAL 恢复的偏移语义：从 magic + version 之后开始解析 records，并确保损坏尾部的截断位置仍是相对整个文件的绝对偏移。
+# WriteBatch 已闭环(DB::write 预留连续 seq 段、按操作序分配,put/remove 退化为单 op batch;WAL 版本头、batch framing、torn write 恢复都已提交),本轮补齐 batch 复用语义与 remove 自动 flush 测试,完整 161 绿。下一刀开乐观事务:先答设计题再写码——冲突检测怎么判(写集内任何 key 在库里的 max seq > 本事务快照 seq 即 abort?)、读己之写怎么叠(事务 buffer 盖在读路径上,快照读不到但自己读得到);最小语义:begin 取快照、读叠加 buffer、commit 走 WriteBatch、冲突则 abort。墓碑最底层回收继续搁置。

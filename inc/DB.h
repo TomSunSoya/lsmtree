@@ -1,6 +1,5 @@
 #pragma once
 
-#include <cstddef>
 #include <filesystem>
 #include <memory>
 #include <string>
@@ -11,6 +10,7 @@
 #include "Manifest.h"
 #include "MemTable.h"
 #include "SSTable.h"
+#include "WriteBatch.h"
 
 class Snapshot;
 
@@ -25,6 +25,7 @@ class DB
     bool get(std::string_view key, std::string& value) const;
     bool get(std::string_view key, uint64_t readSeq, std::string& value) const;
     bool remove(const std::string& key);
+    bool write(const WriteBatch& batch);
 
     void flush();
     void compact();

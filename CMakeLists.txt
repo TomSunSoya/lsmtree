@@ -10,7 +10,8 @@ add_library(lsmtree_lib
         src/Manifest.cpp
         src/MemTable.cpp
         src/SSTable.cpp
-        src/utils.cpp)
+        src/utils.cpp
+        src/WriteBatch.cpp)
 target_include_directories(lsmtree_lib PUBLIC inc)
 target_compile_features(lsmtree_lib PUBLIC cxx_std_23)
 

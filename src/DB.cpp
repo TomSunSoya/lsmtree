@@ -196,19 +196,9 @@ DB::DB(const std::filesystem::path& dataDirectory, const uint64_t flushThreshold
 
 bool DB::put(const std::string& key, const std::string& value)
 {
-    if (!activeMemTable_->put(key, nextSeq_++, value))
-        return false;
-
-    try
-    {
-        if (activeMemTable_->size_bytes() > flushThresholdBytes_)
-            flush();
-    }
-    catch (const std::exception& error)
-    {
-        std::cerr << error.what() << std::endl;
-    }
-    return true;
+    WriteBatch batch;
+    batch.put(key, value);
+    return write(batch);
 }
 
 bool DB::get(const std::string_view key, std::string& value) const { return get(key, nextSeq_ - 1, value); }
@@ -221,7 +211,37 @@ bool DB::get(const std::string_view key, const uint64_t readSeq, std::string& va
     return result == Result::VALUE;
 }
 
-bool DB::remove(const std::string& key) { return activeMemTable_->remove(key, nextSeq_++); }
+bool DB::remove(const std::string& key)
+{
+    WriteBatch batch;
+    batch.remove(key);
+    return write(batch);
+}
+
+bool DB::write(const WriteBatch& batch)
+{
+    uint64_t seq = nextSeq_;
+    nextSeq_ += batch.records_.size();
+    std::vector<Record> records;
+    records.reserve(batch.records_.size());
+    for (const auto& [key, type, value] : batch.records_)
+    {
+        records.emplace_back(key, seq++, type, value);
+    }
+
+    if (!activeMemTable_->applyBatch(records))
+        return false;
+    try
+    {
+        if (activeMemTable_->size_bytes() > flushThresholdBytes_)
+            flush();
+    }
+    catch (const std::exception& error)
+    {
+        std::cerr << error.what() << std::endl;
+    }
+    return true;
+}
 
 void DB::flush()
 {

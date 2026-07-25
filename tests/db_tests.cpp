@@ -238,6 +238,129 @@ TEST(DBTest, PutAndGetPreserveEmptyKeysAndValues)
     }
 }
 
+TEST(DBTest, WriteBatchAssignsConsecutiveSequencesInOperationOrder)
+{
+    const std::filesystem::path root("db_tests_write_batch_operation_order");
+    const ScopedPathCleanup cleanup(root);
+    const std::filesystem::path walPath = root / "wal" / "wal_0.wal";
+
+    {
+        DB db(root, kManualFlushThreshold);
+        WriteBatch batch;
+        batch.put("key", "first");
+        batch.remove("key");
+        batch.put("key", "last");
+
+        ASSERT_TRUE(db.write(batch));
+
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "key", 1, "first"));
+        ASSERT_NO_FATAL_FAILURE(expectMissing(db, "key", 2));
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "key", 3, "last"));
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "key", "last"));
+    }
+
+    ASSERT_NO_FATAL_FAILURE(
+        expectFileContent(walPath, walContent("3,P,1,3,key=5,first\nD,2,3,key=0,\nP,3,3,key=4,last\n")));
+}
+
+TEST(DBTest, WriteBatchRespectsSnapshotsTakenBeforeAndAfterBatch)
+{
+    const std::filesystem::path root("db_tests_write_batch_snapshot_boundaries");
+    const ScopedPathCleanup cleanup(root);
+
+    DB db(root, kManualFlushThreshold);
+    ASSERT_NO_FATAL_FAILURE(expectPut(db, "key", "before"));
+    const Snapshot beforeBatch = db.snapshot();
+
+    WriteBatch batch;
+    batch.put("key", "in-batch");
+    batch.put("added", "visible-after-batch");
+    ASSERT_TRUE(db.write(batch));
+    const Snapshot afterBatch = db.snapshot();
+
+    ASSERT_NO_FATAL_FAILURE(expectPut(db, "key", "after"));
+
+    EXPECT_EQ(1, beforeBatch.seq());
+    ASSERT_NO_FATAL_FAILURE(expectGet(db, "key", beforeBatch.seq(), "before"));
+    ASSERT_NO_FATAL_FAILURE(expectMissing(db, "added", beforeBatch.seq()));
+
+    EXPECT_EQ(3, afterBatch.seq());
+    ASSERT_NO_FATAL_FAILURE(expectGet(db, "key", afterBatch.seq(), "in-batch"));
+    ASSERT_NO_FATAL_FAILURE(expectGet(db, "added", afterBatch.seq(), "visible-after-batch"));
+    ASSERT_NO_FATAL_FAILURE(expectGet(db, "key", "after"));
+}
+
+TEST(DBTest, ClearedAndEmptyWriteBatchDoesNotConsumeSequence)
+{
+    const std::filesystem::path root("db_tests_write_batch_clear");
+    const ScopedPathCleanup cleanup(root);
+    const std::filesystem::path walPath = root / "wal" / "wal_0.wal";
+
+    DB db(root, kManualFlushThreshold);
+    WriteBatch batch;
+    batch.put("discarded", "value");
+    batch.remove("also-discarded");
+    batch.clear();
+
+    ASSERT_TRUE(db.write(batch));
+    const Snapshot afterEmptyBatch = db.snapshot();
+    EXPECT_EQ(0, afterEmptyBatch.seq());
+    expectMissing(db, "discarded");
+    expectMissing(db, "also-discarded");
+    ASSERT_NO_FATAL_FAILURE(expectFileContent(walPath, kWalHeader));
+
+    batch.put("kept", "value");
+    ASSERT_TRUE(db.write(batch));
+    ASSERT_NO_FATAL_FAILURE(expectGet(db, "kept", 1, "value"));
+    ASSERT_NO_FATAL_FAILURE(expectFileContent(walPath, walContent("1,P,1,4,kept=5,value\n")));
+}
+
+TEST(DBTest, WriteBatchRetainsRecordsAcrossWritesUntilCleared)
+{
+    const std::filesystem::path root("db_tests_write_batch_reuse");
+    const ScopedPathCleanup cleanup(root);
+    const std::filesystem::path walPath = root / "wal" / "wal_0.wal";
+
+    {
+        DB db(root, kManualFlushThreshold);
+        WriteBatch batch;
+        batch.put("key", "value");
+
+        ASSERT_TRUE(db.write(batch));
+        ASSERT_TRUE(db.write(batch));
+    }
+
+    ASSERT_NO_FATAL_FAILURE(expectFileContent(walPath, walContent("1,P,1,3,key=5,value\n1,P,2,3,key=5,value\n")));
+}
+
+TEST(DBTest, WriteBatchReopensFromWalAndContinuesSequence)
+{
+    const std::filesystem::path root("db_tests_write_batch_reopen");
+    const ScopedPathCleanup cleanup(root);
+    const std::filesystem::path walPath = root / "wal" / "wal_0.wal";
+
+    {
+        DB db(root, kManualFlushThreshold);
+        WriteBatch batch;
+        batch.put("alpha", "one");
+        batch.remove("ghost");
+
+        ASSERT_TRUE(db.write(batch));
+    }
+
+    {
+        DB db(root, kManualFlushThreshold);
+
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "alpha", "one"));
+        expectMissing(db, "ghost");
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "gamma", "three"));
+        ASSERT_NO_FATAL_FAILURE(expectGet(db, "gamma", 3, "three"));
+    }
+
+    ASSERT_NO_FATAL_FAILURE(
+        expectFileContent(walPath, walContent("2,P,1,5,alpha=3,one\nD,2,5,ghost=0,\n1,P,3,5,gamma=5,three\n")));
+}
+
 TEST(DBTest, ReopensFromWal)
 {
     const std::filesystem::path root("db_tests_reopen_from_wal");
@@ -396,6 +519,29 @@ TEST(DBTest, PutAutoFlushesWhenMemTableSizeExceedsThreshold)
     }
 
     ASSERT_NO_FATAL_FAILURE(expectFileContent(newWalPath, walContent("1,P,3,1,d=1,4\n")));
+}
+
+TEST(DBTest, RemoveAutoFlushesWhenTombstoneSizeExceedsThreshold)
+{
+    const std::filesystem::path root("db_tests_remove_auto_flush_exceeds_threshold");
+    const ScopedPathCleanup cleanup(root);
+    const std::filesystem::path oldWalPath = root / "wal" / "wal_0.wal";
+    const std::filesystem::path newWalPath = root / "wal" / "wal_1.wal";
+    const std::filesystem::path sstablePath = root / "sstable" / "sst_0.sst";
+    constexpr uint64_t threshold = sizeof(Type) + sizeof(uint64_t);
+
+    {
+        DB db(root, threshold);
+
+        ASSERT_NO_FATAL_FAILURE(expectRemove(db, "k"));
+
+        EXPECT_TRUE(std::filesystem::is_regular_file(sstablePath));
+        EXPECT_FALSE(std::filesystem::exists(oldWalPath));
+        EXPECT_TRUE(std::filesystem::is_regular_file(newWalPath));
+        expectMissing(db, "k");
+    }
+
+    ASSERT_NO_FATAL_FAILURE(expectFileContent(newWalPath, kWalHeader));
 }
 
 TEST(DBTest, FlushPublishesSSTableAndRotatesWal)
