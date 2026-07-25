@@ -18,6 +18,7 @@ class MemTable
     bool put(const std::string& key, uint64_t seq, const std::string& value);
     Result get(std::string_view key, uint64_t readSeq, std::string& value) const;
     bool remove(const std::string& key, uint64_t seq);
+    bool applyBatch(const std::vector<Record>& ops);
 
     [[nodiscard]] size_t size() const;
     [[nodiscard]] size_t size_bytes() const;
@@ -49,7 +50,6 @@ class MemTable
 
     friend class MemTableIterator;
 
-    bool appendToWAL(const std::string& key, uint64_t seq, const std::string& value, Type type);
     bool restoreFromWAL();
     static std::vector<std::pair<std::string, Entry>> parseWALRecords(std::string_view content, size_t& lastGoodOffset);
 

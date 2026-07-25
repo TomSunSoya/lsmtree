@@ -5,6 +5,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include <gtest/gtest.h>
 
@@ -288,6 +289,69 @@ TEST(MemTableTest, SizeBytesTracksTombstoneAfterRemove)
         ASSERT_NO_FATAL_FAILURE(expectRemove(table, "alpha", 2));
         EXPECT_EQ(entrySize("alpha", "one") + entrySize("alpha", ""), table.size_bytes());
     }
+}
+
+TEST(MemTableTest, ApplyEmptyBatchDoesNotChangeTableOrWal)
+{
+    const std::filesystem::path logPath("memtable_tests_apply_empty_batch.wal");
+    const ScopedPathCleanup cleanup(logPath);
+
+    {
+        MemTable table(logPath.string());
+
+        EXPECT_TRUE(table.applyBatch({}));
+        EXPECT_EQ(0u, table.size());
+        EXPECT_EQ(0u, table.size_bytes());
+        ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, kWalHeader));
+    }
+
+    {
+        const MemTable table(logPath.string());
+
+        EXPECT_EQ(0u, table.size());
+        EXPECT_EQ(0u, table.size_bytes());
+    }
+}
+
+TEST(MemTableTest, ApplyBatchWritesOneFrameAndRestoresEveryOperation)
+{
+    const std::filesystem::path logPath("memtable_tests_apply_batch.wal");
+    const ScopedPathCleanup cleanup(logPath);
+    const std::vector<Record> operations{
+        {"alpha", 10, Type::VALUE, "one"},
+        {"key", 20, Type::VALUE, "old"},
+        {"key", 30, Type::VALUE, "new"},
+        {"ghost", 40, Type::TOMBSTONE, ""},
+    };
+    const std::string expected =
+        walContent("4,P,10,5,alpha=3,one\nP,20,3,key=3,old\nP,30,3,key=3,new\nD,40,5,ghost=0,\n");
+
+    {
+        MemTable table(logPath.string());
+
+        ASSERT_TRUE(table.applyBatch(operations));
+        EXPECT_EQ(4u, table.size());
+        EXPECT_EQ(entrySize("alpha", "one") + entrySize("key", "old") + entrySize("key", "new") +
+                      entrySize("ghost", ""),
+                  table.size_bytes());
+        ASSERT_NO_FATAL_FAILURE(expectGet(table, "alpha", "one"));
+        ASSERT_NO_FATAL_FAILURE(expectGet(table, "key", "new"));
+        ASSERT_NO_FATAL_FAILURE(expectGet(table, "key", "old", 20));
+        expectTombstone(table, "ghost");
+        ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, expected));
+    }
+
+    {
+        const MemTable table(logPath.string());
+
+        ASSERT_NO_FATAL_FAILURE(expectGet(table, "alpha", "one"));
+        ASSERT_NO_FATAL_FAILURE(expectGet(table, "key", "new"));
+        ASSERT_NO_FATAL_FAILURE(expectGet(table, "key", "old", 20));
+        expectTombstone(table, "ghost");
+        EXPECT_EQ(40, table.getMaxWALSeq());
+    }
+
+    ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, expected));
 }
 
 TEST(MemTableTest, WALNewFileContainsHeaderAndReopensWithoutDuplicatingIt)

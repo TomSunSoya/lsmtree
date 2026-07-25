@@ -17,10 +17,14 @@ constexpr uint8_t VERSION = 1;
 constexpr size_t kMagicSize = 4;
 std::string encodeWALRecord(const std::string& key, const uint64_t seq, const std::string& value, const Type type)
 {
-    constexpr std::string batchNumber = "1,";
     const std::string operation = type == Type::VALUE ? "P," : "D,";
-    return batchNumber + operation + std::to_string(seq) + "," + std::to_string(key.size()) + "," + key + "=" +
+    return operation + std::to_string(seq) + "," + std::to_string(key.size()) + "," + key + "=" +
            std::to_string(value.size()) + "," + value + "\n";
+}
+
+std::string encodeWALRecord(const Record& record)
+{
+    return encodeWALRecord(record.key, record.seq, record.value, record.type);
 }
 
 class WALParser
@@ -129,15 +133,7 @@ MemTable::MemTable(const std::string_view logFilePath)
 
 bool MemTable::put(const std::string& key, const uint64_t seq, const std::string& value)
 {
-    if (!appendToWAL(key, seq, value, Type::VALUE))
-        return false;
-
-    table_[{key, seq}] = {Type::VALUE, seq, value};
-    currentSizeBytes_ += value.size();
-    currentSizeBytes_ += key.size();
-    currentSizeBytes_ += sizeof(Type);
-    currentSizeBytes_ += sizeof(seq);
-    return true;
+    return applyBatch({Record{key, seq, Type::VALUE, value}});
 }
 
 Result MemTable::get(const std::string_view key, const uint64_t readSeq, std::string& value) const
@@ -155,14 +151,40 @@ Result MemTable::get(const std::string_view key, const uint64_t readSeq, std::st
 
 bool MemTable::remove(const std::string& key, const uint64_t seq)
 {
-    if (!appendToWAL(key, seq, "", Type::TOMBSTONE))
+    return applyBatch({Record{key, seq, Type::TOMBSTONE}});
+}
+
+bool MemTable::applyBatch(const std::vector<Record>& ops)
+{
+    if (ops.empty())
+        return true;
+    std::string content = std::to_string(ops.size()) + ",";
+    for (const auto& record : ops)
+        content += encodeWALRecord(record);
+
+    try
+    {
+        walWriter_.write(content);
+    }
+    catch (const std::system_error& error)
+    {
+        std::cerr << "Write batch failed: " << error.code().message() << std::endl;
         return false;
+    }
+    catch (const std::runtime_error& e)
+    {
+        std::cerr << "WAL file has been poisoned: " << e.what() << std::endl;
+        return false;
+    }
 
-    table_[{key, seq}] = {Type::TOMBSTONE, seq, ""};
-    currentSizeBytes_ += sizeof(Type);
-    currentSizeBytes_ += key.size();
-    currentSizeBytes_ += sizeof(seq);
-
+    for (const auto& [key, seq, type, value] : ops)
+    {
+        table_[Key{key, seq}] = Entry{type, seq, value};
+        currentSizeBytes_ += value.size();
+        currentSizeBytes_ += key.size();
+        currentSizeBytes_ += sizeof(Type);
+        currentSizeBytes_ += sizeof(seq);
+    }
     return true;
 }
 
@@ -228,20 +250,6 @@ int MemTable::WALFileWriter::truncate(const size_t offset)
     if (::ftruncate(fileDescriptor_, static_cast<off_t>(offset)) == 0)
         return 0;
     return errno;
-}
-
-bool MemTable::appendToWAL(const std::string& key, const uint64_t seq, const std::string& value, const Type type)
-{
-    try
-    {
-        walWriter_.write(encodeWALRecord(key, seq, value, type));
-        return true;
-    }
-    catch (const std::system_error& error)
-    {
-        std::cerr << "putToWAL failed: " << error.code().message() << std::endl;
-        return false;
-    }
 }
 
 bool MemTable::restoreFromWAL()
