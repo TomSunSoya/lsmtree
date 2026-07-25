@@ -17,8 +17,9 @@ constexpr uint8_t VERSION = 1;
 constexpr size_t kMagicSize = 4;
 std::string encodeWALRecord(const std::string& key, const uint64_t seq, const std::string& value, const Type type)
 {
+    constexpr std::string batchNumber = "1,";
     const std::string operation = type == Type::VALUE ? "P," : "D,";
-    return operation + std::to_string(seq) + "," + std::to_string(key.size()) + "," + key + "=" +
+    return batchNumber + operation + std::to_string(seq) + "," + std::to_string(key.size()) + "," + key + "=" +
            std::to_string(value.size()) + "," + value + "\n";
 }
 
@@ -33,27 +34,35 @@ class WALParser
         while (position_ < content_.size())
         {
             lastGoodOffset = position_;
-
-            std::string_view operation;
-            if (!readField(1, operation) || !consume(','))
-                return records;
-            if (operation != "D" && operation != "P")
+            uint64_t batchNumber = 0;
+            if (!readLength(batchNumber) || !consume(','))
                 return records;
 
-            uint64_t seq = 0;
-            if (!readLength(seq) || !consume(','))
-                return records;
+            std::vector<std::pair<std::string, Entry>> batchRecords;
+            for (uint64_t i = 0; i < batchNumber; ++i)
+            {
+                std::string_view operation;
+                if (!readField(1, operation) || !consume(','))
+                    return records;
+                if (operation != "D" && operation != "P")
+                    return records;
 
-            std::string_view key;
-            if (!readLengthPrefixedField(key, '='))
-                return records;
+                uint64_t seq = 0;
+                if (!readLength(seq) || !consume(','))
+                    return records;
 
-            std::string_view value;
-            if (!readLengthPrefixedField(value, '\n'))
-                return records;
+                std::string_view key;
+                if (!readLengthPrefixedField(key, '='))
+                    return records;
 
-            const Type type = operation == "P" ? Type::VALUE : Type::TOMBSTONE;
-            records.emplace_back(std::string(key), Entry{type, seq, std::string(value)});
+                std::string_view value;
+                if (!readLengthPrefixedField(value, '\n'))
+                    return records;
+
+                const Type type = operation == "P" ? Type::VALUE : Type::TOMBSTONE;
+                batchRecords.emplace_back(std::string(key), Entry{type, seq, std::string(value)});
+            }
+            records.insert(records.end(), batchRecords.begin(), batchRecords.end());
         }
 
         lastGoodOffset = position_;

@@ -227,7 +227,7 @@ TEST(MemTableTest, RemoveHidesExistingKeyAndWritesTombstone)
         ASSERT_NO_FATAL_FAILURE(expectGet(table, "alpha", "one", 10));
     }
 
-    ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, walContent("P,10,5,alpha=3,one\nD,11,5,alpha=0,\n")));
+    ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, walContent("1,P,10,5,alpha=3,one\n1,D,11,5,alpha=0,\n")));
 }
 
 TEST(MemTableTest, RemoveMissingKeyRecordsTombstoneAndReplaysAsMissing)
@@ -244,7 +244,7 @@ TEST(MemTableTest, RemoveMissingKeyRecordsTombstoneAndReplaysAsMissing)
         EXPECT_EQ(entrySize("ghost", ""), table.size_bytes());
     }
 
-    ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, walContent("D,7,5,ghost=0,\n")));
+    ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, walContent("1,D,7,5,ghost=0,\n")));
 
     {
         MemTable table(logPath.string());
@@ -271,7 +271,7 @@ TEST(MemTableTest, PutAfterRemoveRestoresKeyWithNewValue)
     }
 
     ASSERT_NO_FATAL_FAILURE(
-        expectFileContent(logPath, walContent("P,20,3,key=3,old\nD,21,3,key=0,\nP,22,3,key=3,new\n")));
+        expectFileContent(logPath, walContent("1,P,20,3,key=3,old\n1,D,21,3,key=0,\n1,P,22,3,key=3,new\n")));
 }
 
 TEST(MemTableTest, SizeBytesTracksTombstoneAfterRemove)
@@ -323,7 +323,7 @@ TEST(MemTableTest, WALRejectsWrongMagic)
 {
     const std::filesystem::path logPath("memtable_tests_wal_wrong_magic.wal");
     const ScopedPathCleanup cleanup(logPath);
-    std::string content = walContent("P,1,1,k=1,v\n");
+    std::string content = walContent("1,P,1,1,k=1,v\n");
     content[0] = 'X';
     ASSERT_NO_FATAL_FAILURE(writeFile(logPath, content));
 
@@ -334,7 +334,7 @@ TEST(MemTableTest, WALRejectsUnsupportedVersion)
 {
     const std::filesystem::path logPath("memtable_tests_wal_unsupported_version.wal");
     const ScopedPathCleanup cleanup(logPath);
-    std::string content = walContent("P,1,1,k=1,v\n");
+    std::string content = walContent("1,P,1,1,k=1,v\n");
     content[4] = '\x02';
     ASSERT_NO_FATAL_FAILURE(writeFile(logPath, content));
 
@@ -345,7 +345,7 @@ TEST(MemTableTest, WALRestoresExistingRecords)
 {
     const std::filesystem::path logPath("memtable_tests_restore_existing.wal");
     const ScopedPathCleanup cleanup(logPath);
-    ASSERT_NO_FATAL_FAILURE(writeFile(logPath, walContent("P,12,5,alpha=3,one\nP,47,4,beta=3,two\n")));
+    ASSERT_NO_FATAL_FAILURE(writeFile(logPath, walContent("1,P,12,5,alpha=3,one\n1,P,47,4,beta=3,two\n")));
 
     {
         MemTable table(logPath.string());
@@ -356,14 +356,70 @@ TEST(MemTableTest, WALRestoresExistingRecords)
         EXPECT_EQ(47, table.getMaxWALSeq());
     }
 
-    ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, walContent("P,12,5,alpha=3,one\nP,47,4,beta=3,two\n")));
+    ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, walContent("1,P,12,5,alpha=3,one\n1,P,47,4,beta=3,two\n")));
+}
+
+TEST(MemTableTest, WALRestoresEveryRecordFromCompleteMultiRecordBatch)
+{
+    const std::filesystem::path logPath("memtable_tests_restore_complete_batch.wal");
+    const ScopedPathCleanup cleanup(logPath);
+    const std::string content = walContent("3,P,10,5,alpha=3,one\nP,11,4,beta=3,two\nD,12,5,ghost=0,\n");
+    ASSERT_NO_FATAL_FAILURE(writeFile(logPath, content));
+
+    {
+        MemTable table(logPath.string());
+
+        ASSERT_NO_FATAL_FAILURE(expectGet(table, "alpha", "one"));
+        ASSERT_NO_FATAL_FAILURE(expectGet(table, "beta", "two"));
+        expectTombstone(table, "ghost");
+        EXPECT_EQ(12, table.getMaxWALSeq());
+    }
+
+    ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, content));
+}
+
+TEST(MemTableTest, WALDropsEntireIncompleteFinalBatch)
+{
+    const std::filesystem::path logPath("memtable_tests_restore_incomplete_batch.wal");
+    const ScopedPathCleanup cleanup(logPath);
+    ASSERT_NO_FATAL_FAILURE(
+        writeFile(logPath, walContent("1,P,5,5,alpha=3,one\n2,P,6,4,beta=3,two\nP,7,5,gamma=5,thr")));
+
+    {
+        MemTable table(logPath.string());
+
+        ASSERT_NO_FATAL_FAILURE(expectGet(table, "alpha", "one"));
+        expectMissing(table, "beta");
+        expectMissing(table, "gamma");
+        EXPECT_EQ(5, table.getMaxWALSeq());
+    }
+
+    ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, walContent("1,P,5,5,alpha=3,one\n")));
+}
+
+TEST(MemTableTest, WALTreatsOverflowBatchCountAsDamagedTail)
+{
+    const std::filesystem::path logPath("memtable_tests_restore_overflow_batch_count.wal");
+    const ScopedPathCleanup cleanup(logPath);
+    ASSERT_NO_FATAL_FAILURE(
+        writeFile(logPath, walContent("1,P,5,5,alpha=3,one\n99999999999999999999999,P,6,3,bad=1,x\n")));
+
+    {
+        MemTable table(logPath.string());
+
+        ASSERT_NO_FATAL_FAILURE(expectGet(table, "alpha", "one"));
+        expectMissing(table, "bad");
+        EXPECT_EQ(5, table.getMaxWALSeq());
+    }
+
+    ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, walContent("1,P,5,5,alpha=3,one\n")));
 }
 
 TEST(MemTableTest, WALReplayKeepsLatestValueForDuplicateKey)
 {
     const std::filesystem::path logPath("memtable_tests_restore_duplicate.wal");
     const ScopedPathCleanup cleanup(logPath);
-    ASSERT_NO_FATAL_FAILURE(writeFile(logPath, walContent("P,1,1,k=3,old\nP,2,1,k=3,new\n")));
+    ASSERT_NO_FATAL_FAILURE(writeFile(logPath, walContent("1,P,1,1,k=3,old\n1,P,2,1,k=3,new\n")));
 
     {
         MemTable table(logPath.string());
@@ -372,7 +428,7 @@ TEST(MemTableTest, WALReplayKeepsLatestValueForDuplicateKey)
         EXPECT_EQ(2, table.getMaxWALSeq());
     }
 
-    ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, walContent("P,1,1,k=3,old\nP,2,1,k=3,new\n")));
+    ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, walContent("1,P,1,1,k=3,old\n1,P,2,1,k=3,new\n")));
 }
 
 TEST(MemTableTest, WALReplayKeepsTombstoneForDeletedKey)
@@ -394,14 +450,14 @@ TEST(MemTableTest, WALReplayKeepsTombstoneForDeletedKey)
         expectTombstone(table, "k");
     }
 
-    ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, walContent("P,3,1,k=3,old\nD,4,1,k=0,\n")));
+    ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, walContent("1,P,3,1,k=3,old\n1,D,4,1,k=0,\n")));
 }
 
 TEST(MemTableTest, WALTruncatesIncompleteTailDuringRestore)
 {
     const std::filesystem::path logPath("memtable_tests_restore_truncate_tail.wal");
     const ScopedPathCleanup cleanup(logPath);
-    ASSERT_NO_FATAL_FAILURE(writeFile(logPath, walContent("P,5,5,alpha=3,one\nP,6,4,beta=3")));
+    ASSERT_NO_FATAL_FAILURE(writeFile(logPath, walContent("1,P,5,5,alpha=3,one\n1,P,6,4,beta=3")));
 
     {
         MemTable table(logPath.string());
@@ -410,14 +466,14 @@ TEST(MemTableTest, WALTruncatesIncompleteTailDuringRestore)
         expectMissing(table, "beta");
     }
 
-    ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, walContent("P,5,5,alpha=3,one\n")));
+    ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, walContent("1,P,5,5,alpha=3,one\n")));
 }
 
 TEST(MemTableTest, WALCanAppendAfterTruncatingDamagedTailAndRestoreAgain)
 {
     const std::filesystem::path logPath("memtable_tests_restore_append_after_truncate.wal");
     const ScopedPathCleanup cleanup(logPath);
-    ASSERT_NO_FATAL_FAILURE(writeFile(logPath, walContent("P,5,5,alpha=3,one\nP,6,4,beta=3")));
+    ASSERT_NO_FATAL_FAILURE(writeFile(logPath, walContent("1,P,5,5,alpha=3,one\n1,P,6,4,beta=3")));
 
     {
         MemTable table(logPath.string());
@@ -436,14 +492,15 @@ TEST(MemTableTest, WALCanAppendAfterTruncatingDamagedTailAndRestoreAgain)
         expectMissing(table, "beta");
     }
 
-    ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, walContent("P,5,5,alpha=3,one\nP,7,5,gamma=5,three\n")));
+    ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, walContent("1,P,5,5,alpha=3,one\n1,P,7,5,gamma=5,three\n")));
 }
 
 TEST(MemTableTest, WALTreatsOverflowLengthAsDamagedTail)
 {
     const std::filesystem::path logPath("memtable_tests_restore_overflow_length.wal");
     const ScopedPathCleanup cleanup(logPath);
-    ASSERT_NO_FATAL_FAILURE(writeFile(logPath, walContent("P,5,5,alpha=3,one\nP,99999999999999999999999,3,bad=1,x\n")));
+    ASSERT_NO_FATAL_FAILURE(
+        writeFile(logPath, walContent("1,P,5,5,alpha=3,one\n1,P,99999999999999999999999,3,bad=1,x\n")));
 
     {
         MemTable table(logPath.string());
@@ -452,7 +509,7 @@ TEST(MemTableTest, WALTreatsOverflowLengthAsDamagedTail)
         expectMissing(table, "bad");
     }
 
-    ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, walContent("P,5,5,alpha=3,one\n")));
+    ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, walContent("1,P,5,5,alpha=3,one\n")));
 }
 
 TEST(MemTableTest, WALAppendFormat)
@@ -465,19 +522,19 @@ TEST(MemTableTest, WALAppendFormat)
         std::string expected(kWalHeader);
 
         ASSERT_NO_FATAL_FAILURE(expectPut(table, "alpha", "one", 41));
-        expected += "P,41,5,alpha=3,one\n";
+        expected += "1,P,41,5,alpha=3,one\n";
         ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, expected));
 
         ASSERT_NO_FATAL_FAILURE(expectPut(table, "beta", "two", 42));
-        expected += "P,42,4,beta=3,two\n";
+        expected += "1,P,42,4,beta=3,two\n";
         ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, expected));
 
         ASSERT_NO_FATAL_FAILURE(expectPut(table, "a,b=c", "v=1,ok", 43));
-        expected += "P,43,5,a,b=c=6,v=1,ok\n";
+        expected += "1,P,43,5,a,b=c=6,v=1,ok\n";
         ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, expected));
 
         ASSERT_NO_FATAL_FAILURE(expectPut(table, "a", "vvv\n\n\rvvv", 44));
-        expected += "P,44,1,a=9,vvv\n\n\rvvv\n";
+        expected += "1,P,44,1,a=9,vvv\n\n\rvvv\n";
         ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, expected));
     }
 }
@@ -490,7 +547,7 @@ TEST(MemTableTest, WALAppendsToExistingLog)
     {
         std::ofstream seed(logPath, std::ios::binary);
         ASSERT_TRUE(seed.is_open()) << "expected seed WAL to open";
-        seed << walContent("P,98,4,seed=5,value\n");
+        seed << walContent("1,P,98,4,seed=5,value\n");
     }
 
     {
@@ -498,7 +555,7 @@ TEST(MemTableTest, WALAppendsToExistingLog)
         ASSERT_NO_FATAL_FAILURE(expectPut(table, "next", "record", 99));
     }
 
-    ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, walContent("P,98,4,seed=5,value\nP,99,4,next=6,record\n")));
+    ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, walContent("1,P,98,4,seed=5,value\n1,P,99,4,next=6,record\n")));
 }
 
 TEST(MemTableTest, WALCreatesParentDirectories)
@@ -512,7 +569,7 @@ TEST(MemTableTest, WALCreatesParentDirectories)
         ASSERT_NO_FATAL_FAILURE(expectPut(table, "parent", "created", 7));
 
         EXPECT_TRUE(std::filesystem::exists(logPath)) << "expected WAL file in nested directory";
-        ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, walContent("P,7,6,parent=7,created\n")));
+        ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, walContent("1,P,7,6,parent=7,created\n")));
     }
 }
 
@@ -526,17 +583,17 @@ TEST(MemTableTest, WALRecordsEmptyAndMultiDigitLengths)
         std::string expected(kWalHeader);
 
         ASSERT_NO_FATAL_FAILURE(expectPut(table, "empty-value", "", 8));
-        expected += "P,8,11,empty-value=0,\n";
+        expected += "1,P,8,11,empty-value=0,\n";
         ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, expected));
         ASSERT_NO_FATAL_FAILURE(expectGet(table, "empty-value", ""));
 
         ASSERT_NO_FATAL_FAILURE(expectPut(table, "tenletters", "0123456789abc", 9));
-        expected += "P,9,10,tenletters=13,0123456789abc\n";
+        expected += "1,P,9,10,tenletters=13,0123456789abc\n";
         ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, expected));
         ASSERT_NO_FATAL_FAILURE(expectGet(table, "tenletters", "0123456789abc"));
 
         ASSERT_NO_FATAL_FAILURE(expectPut(table, "", "", 10));
-        expected += "P,10,0,=0,\n";
+        expected += "1,P,10,0,=0,\n";
         ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, expected));
         ASSERT_NO_FATAL_FAILURE(expectGet(table, "", ""));
     }
