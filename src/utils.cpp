@@ -18,7 +18,7 @@ namespace
 struct MergeItem
 {
     std::string key;
-    int sourceIndex;
+    size_t sourceIndex;
     uint64_t seq;
 
     bool operator<(const MergeItem& other) const
@@ -30,21 +30,19 @@ struct MergeItem
 };
 
 void enqueueCurrent(std::priority_queue<MergeItem>& queue, const std::vector<std::unique_ptr<Iterator>>& sources,
-                    int index)
+                    const size_t index)
 {
-    if (sources[index] && sources[index]->valid())
-        queue.emplace(sources[index]->current().key, index, sources[index]->current().seq);
+    const auto& source = sources[index];
+    if (source && source->valid())
+        queue.emplace(source->current().key, index, source->current().seq);
 }
 } // namespace
 
 std::optional<uint64_t> parseNumberedFile(const std::string_view filename, const std::string_view prefix,
                                           const std::string_view suffix)
 {
-    if (filename.size() <= prefix.size() + suffix.size())
-        return std::nullopt;
-    if (!filename.starts_with(prefix))
-        return std::nullopt;
-    if (!filename.ends_with(suffix))
+    if (filename.size() <= prefix.size() + suffix.size() || !filename.starts_with(prefix) ||
+        !filename.ends_with(suffix))
         return std::nullopt;
 
     const std::string numberText{filename.substr(prefix.size(), filename.size() - prefix.size() - suffix.size())};
@@ -63,14 +61,14 @@ std::optional<uint64_t> parseNumberedFile(const std::string_view filename, const
     }
 }
 
-std::filesystem::path walPath(const std::filesystem::path& dataDir, const uint64_t fileNumber)
+std::filesystem::path walPath(const std::filesystem::path& dataDirectory, const uint64_t fileNumber)
 {
-    return dataDir / "wal" / std::format("{}{}{}", kWalPrefix, fileNumber, kWalSuffix);
+    return dataDirectory / "wal" / std::format("{}{}{}", kWalPrefix, fileNumber, kWalSuffix);
 }
 
-std::filesystem::path sstablePath(const std::filesystem::path& dataDir, const uint64_t fileNumber)
+std::filesystem::path sstablePath(const std::filesystem::path& dataDirectory, const uint64_t fileNumber)
 {
-    return dataDir / "sstable" / std::format("{}{}{}", kSSTablePrefix, fileNumber, kSSTableSuffix);
+    return dataDirectory / "sstable" / std::format("{}{}{}", kSSTablePrefix, fileNumber, kSSTableSuffix);
 }
 
 void removeFile(const std::filesystem::path& path, const char* message)
@@ -84,7 +82,7 @@ void removeFile(const std::filesystem::path& path, const char* message)
 
 void writeAll(const int fd, const void* data, std::size_t size)
 {
-    auto* position = static_cast<const char*>(data);
+    const auto* position = static_cast<const char*>(data);
     while (size > 0)
     {
         const ssize_t written = fault::write(fd, position, size);
@@ -168,7 +166,7 @@ uint64_t FileWriter::add(const Record& record)
     writeAll(dataFile_.get(), &valueSize, sizeof(valueSize));
     writeAll(dataFile_.get(), record.key.data(), keySize);
     writeAll(dataFile_.get(), record.value.data(), valueSize);
-    return kEncodedRecordHeaderSize + keySize + valueSize;
+    return encodedRecordSize(record);
 }
 
 void FileWriter::finish()
@@ -198,8 +196,7 @@ int FileWriter::getFd() const { return dataFile_.get(); }
 SnapshotIterator::SnapshotIterator(std::unique_ptr<Iterator> iterator, const uint64_t readSeq)
     : iterator_(std::move(iterator)), readSeq_(readSeq)
 {
-    while (iterator_->valid() && iterator_->current().seq > readSeq_)
-        iterator_->advance();
+    skipInvisibleRecords();
 }
 
 bool SnapshotIterator::valid() const { return iterator_->valid(); }
@@ -209,6 +206,11 @@ const Record& SnapshotIterator::current() const { return iterator_->current(); }
 void SnapshotIterator::advance()
 {
     iterator_->advance();
+    skipInvisibleRecords();
+}
+
+void SnapshotIterator::skipInvisibleRecords()
+{
     while (valid() && current().seq > readSeq_)
         iterator_->advance();
 }
@@ -218,7 +220,7 @@ std::vector<Record> mergeAll(std::vector<std::unique_ptr<Iterator>>& sources)
     if (sources.empty())
         return {};
     std::priority_queue<MergeItem> queue;
-    for (int index = 0; index < sources.size(); ++index)
+    for (size_t index = 0; index < sources.size(); ++index)
         enqueueCurrent(queue, sources, index);
 
     std::vector<Record> result;
@@ -239,37 +241,39 @@ void latestVisiblePerKey(std::vector<Record>& records)
 {
     if (records.empty())
         return;
-    records.erase(std::ranges::unique(records, [](auto& a, auto& b) { return a.key == b.key; }).begin(), records.end());
+    const auto sameKey = [](const Record& lhs, const Record& rhs) { return lhs.key == rhs.key; };
+    records.erase(std::ranges::unique(records, sameKey).begin(), records.end());
     std::erase_if(records, [](const Record& record) { return record.type == Type::TOMBSTONE; });
 }
 
-void retainForCompaction(std::vector<Record>& records, const uint64_t Smin)
+void retainForCompaction(std::vector<Record>& records, const uint64_t oldestSnapshotSequence)
 {
     if (records.empty())
         return;
 
-    std::vector<Record> result;
-    result.swap(records);
-    std::string curKey = result.front().key;
-    bool flag = false;
-    auto it = result.begin();
-    while (it != result.end())
+    std::vector<Record> sourceRecords;
+    sourceRecords.swap(records);
+
+    std::string currentKey = sourceRecords.front().key;
+    bool keptSnapshotBoundary = false;
+    for (const Record& record : sourceRecords)
     {
-        if (curKey == it->key)
+        if (record.key != currentKey)
         {
-            if (it->seq > Smin)
-                records.push_back(*it);
-            else if (!flag)
-            {
-                records.push_back(*it);
-                flag = true;
-            }
-            ++it;
+            currentKey = record.key;
+            keptSnapshotBoundary = false;
         }
-        else
+
+        if (record.seq > oldestSnapshotSequence)
         {
-            curKey = it->key;
-            flag = false;
+            records.push_back(record);
+            continue;
+        }
+
+        if (!keptSnapshotBoundary)
+        {
+            records.push_back(record);
+            keptSnapshotBoundary = true;
         }
     }
 }

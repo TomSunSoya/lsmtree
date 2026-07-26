@@ -1,7 +1,9 @@
 #pragma once
 
-#include "utils.h"
+#include <string>
 #include <vector>
+
+#include "utils.h"
 
 // DB::write() does not clear records; call clear() explicitly before reusing a batch.
 class WriteBatch

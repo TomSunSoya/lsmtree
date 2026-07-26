@@ -1,10 +1,13 @@
 #include <cerrno>
 #include <filesystem>
+#include <limits>
 #include <string>
+#include <sys/stat.h>
 #include <vector>
 
 #include <gtest/gtest.h>
 
+#include "DB.h"
 #include "FaultInjection.h"
 #include "MemTable.h"
 #include "test_support.h"
@@ -143,8 +146,8 @@ TEST(FaultInjectionTest, ApplyBatchLeavesMemTableUntouchedWhenFsyncFails)
         EXPECT_EQ(Result::ABSENT, table.get("alpha", 100, value));
         EXPECT_EQ(Result::ABSENT, table.get("beta", 100, value));
 
-        // Weak on purpose: currentSeq_ is only maintained by restore, never by writes,
-        // so this stays 0 either way. Kept because 0 is still the right answer.
+        // The failed batch never reaches the shared in-memory apply path, so it
+        // must not advance the maximum committed sequence either.
         EXPECT_EQ(0u, table.getMaxWALSeq());
     }
 
@@ -186,4 +189,70 @@ TEST(FaultInjectionTest, MemTableStaysDeadAfterFsyncFailure)
     std::string value;
     EXPECT_EQ(Result::ABSENT, table.get("beta", 100, value));
     EXPECT_EQ(0u, table.size());
+}
+
+TEST(FaultInjectionTest, CreatingNewWalFsyncsItsParentDirectory)
+{
+    const std::filesystem::path root("fault_tests_wal_parent_directory");
+    const ScopedPathCleanup cleanup(root);
+    const std::filesystem::path logPath = root / "wal" / "wal_0.wal";
+    unsigned regularFileFsyncs = 0;
+    unsigned directoryFsyncs = 0;
+
+    {
+        const fault::ScopedPolicy policy(
+            [&](const fault::Op op, const int fd, std::size_t)
+            {
+                if (op != fault::Op::Fsync)
+                    return fault::Decision::proceed();
+
+                struct stat status{};
+                if (::fstat(fd, &status) == 0 && S_ISDIR(status.st_mode))
+                    ++directoryFsyncs;
+                else
+                    ++regularFileFsyncs;
+                return fault::Decision::proceed();
+            });
+
+        const MemTable table(logPath.string());
+    }
+
+    EXPECT_GE(regularFileFsyncs, 1u) << "the new WAL header itself must be durable";
+    EXPECT_GE(directoryFsyncs, 1u) << "the parent directory entry must also be durable after creating a WAL";
+}
+
+TEST(FaultInjectionTest, FlushFailureAfterManifestPublishRejectsLaterWrites)
+{
+    const std::filesystem::path root("fault_tests_flush_publish_failure");
+    const ScopedPathCleanup cleanup(root);
+    constexpr uint64_t noAutomaticCompaction = std::numeric_limits<uint64_t>::max();
+
+    {
+        DB db(root, 1, noAutomaticCompaction);
+
+        // Fsync order for this path is: WAL batch, SSTable, SSTable directory,
+        // MANIFEST, MANIFEST directory, then the new WAL header. Failing the
+        // sixth call exercises the dangerous window after the Manifest has
+        // published the replacement WAL but before DB switches activeMemTable_.
+        {
+            const fault::ScopedPolicy policy(fault::failNth(fault::Op::Fsync, 6, EIO));
+            EXPECT_TRUE(db.put("committed-before-switch", "one"))
+                << "the record is already represented by the published SSTable and Manifest";
+        }
+
+        // A DB that cannot finish installing the Manifest's WAL must latch an
+        // error state. A later write must not be acknowledged into the old WAL.
+        {
+            const fault::ScopedPolicy policy(fault::failNth(fault::Op::Fsync, 2, EIO));
+            EXPECT_FALSE(db.put("must-not-be-acknowledged", "two"));
+        }
+    }
+
+    {
+        DB reopened(root, std::numeric_limits<uint64_t>::max(), noAutomaticCompaction);
+        std::string value;
+        ASSERT_TRUE(reopened.get("committed-before-switch", value));
+        EXPECT_EQ("one", value);
+        EXPECT_FALSE(reopened.get("must-not-be-acknowledged", value));
+    }
 }

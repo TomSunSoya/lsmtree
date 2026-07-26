@@ -50,6 +50,8 @@ class SSTableIterator : public Iterator
     void advance() override;
 
   private:
+    void loadNextRecord();
+
     std::optional<Record> currentRecord_{};
     std::ifstream input_;
     uint64_t recordsSize_{};

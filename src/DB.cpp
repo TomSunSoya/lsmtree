@@ -70,7 +70,7 @@ void cleanupUntrackedSSTables(const std::filesystem::path& directory, const Tabl
     }
 }
 
-TableNumbers selectCompactionTables(const Manifest& manifest)
+TableNumbers selectLevelZeroCompactionTables(const Manifest& manifest)
 {
     const auto& levelZero = manifest.level(0);
     TableNumbers selected;
@@ -113,11 +113,6 @@ std::vector<std::unique_ptr<Iterator>> openTableIterators(const std::vector<std:
     return iterators;
 }
 
-uint64_t serializedRecordSize(const Record& record)
-{
-    return kEncodedRecordHeaderSize + record.key.length() + record.value.length();
-}
-
 TableMeta writeCompactionSlice(Manifest& manifest, const std::filesystem::path& dataDirectory,
                                const std::span<Record> records)
 {
@@ -135,7 +130,7 @@ std::vector<TableMeta> writeCompactionOutput(Manifest& manifest, const std::file
 
     for (size_t recordIndex = 0; recordIndex < records.size(); ++recordIndex)
     {
-        currentSliceBytes += serializedRecordSize(records[recordIndex]);
+        currentSliceBytes += encodedRecordSize(records[recordIndex]);
         if (currentSliceBytes <= sliceThreshold)
             continue;
         if (recordIndex + 1 < records.size() && records[recordIndex].key == records[recordIndex + 1].key)
@@ -177,7 +172,7 @@ std::vector<std::filesystem::path> selectScanTables(const Manifest& manifest,
 DB::DB(const std::filesystem::path& dataDirectory, const uint64_t flushThreshold, const uint64_t compactThreshold,
        const uint64_t sliceThreshold, const uint64_t compactBaseThresholdBytes)
     : flushThresholdBytes_(flushThreshold), level0CompactionThreshold_(compactThreshold),
-      compactionSliceBytes_(sliceThreshold), compactBaseThresholdBytes_(compactBaseThresholdBytes), nextSeq_(0)
+      compactionSliceBytes_(sliceThreshold), compactionBaseThresholdBytes_(compactBaseThresholdBytes)
 {
     ensureDataDirectory(dataDirectory);
 
@@ -220,6 +215,9 @@ bool DB::remove(const std::string& key)
 
 bool DB::write(const WriteBatch& batch)
 {
+    if (writeFailed_)
+        return false;
+
     uint64_t seq = nextSeq_;
     nextSeq_ += batch.records_.size();
     std::vector<Record> records;
@@ -248,27 +246,35 @@ void DB::flush()
     if (activeMemTable_->size() == 0)
         return;
 
-    const uint64_t tableNumber = manifest_->allocateNumber();
-    const std::filesystem::path tablePath = sstablePath(dataDirectory_, tableNumber);
-    if (!std::filesystem::exists(tablePath.parent_path()))
-        std::filesystem::create_directories(tablePath.parent_path());
+    try
+    {
+        const uint64_t tableNumber = manifest_->allocateNumber();
+        const std::filesystem::path tablePath = sstablePath(dataDirectory_, tableNumber);
+        if (!std::filesystem::exists(tablePath.parent_path()))
+            std::filesystem::create_directories(tablePath.parent_path());
 
-    const uint64_t nextWALNumber = manifest_->allocateNumber();
-    manifest_->setLogNumber(nextWALNumber);
+        const uint64_t nextWALNumber = manifest_->allocateNumber();
+        manifest_->setLogNumber(nextWALNumber);
 
-    const auto [minKey, maxKey] = SSTable::build(*activeMemTable_, tablePath);
-    manifest_->addTable(tableNumber, std::filesystem::file_size(tablePath), minKey, maxKey, 0);
-    manifest_->setLastSeq(nextSeq_ - 1);
-    manifest_->save();
+        const auto [minKey, maxKey] = SSTable::build(*activeMemTable_, tablePath);
+        manifest_->addTable(tableNumber, std::filesystem::file_size(tablePath), minKey, maxKey, 0);
+        manifest_->setLastSeq(nextSeq_ - 1);
+        manifest_->save();
 
-    const std::filesystem::path oldWALPath = walFilePath_;
-    const std::filesystem::path nextWALPath = walPath(dataDirectory_, nextWALNumber);
-    activeMemTable_ = std::make_unique<MemTable>(nextWALPath.string());
-    walFilePath_ = nextWALPath;
+        const std::filesystem::path oldWALPath = walFilePath_;
+        const std::filesystem::path nextWALPath = walPath(dataDirectory_, nextWALNumber);
+        activeMemTable_ = std::make_unique<MemTable>(nextWALPath.string());
+        walFilePath_ = nextWALPath;
 
-    removeFile(oldWALPath, "remove wal file failed");
+        removeFile(oldWALPath, "remove wal file failed");
 
-    maybeCompact();
+        maybeCompact();
+    }
+    catch (...)
+    {
+        writeFailed_ = true;
+        throw;
+    }
 }
 
 void DB::compact() { compactLevel(0); }
@@ -278,14 +284,14 @@ std::vector<Record> DB::scan(const std::string_view start, const std::string_vie
     std::vector<std::unique_ptr<Iterator>> iterators;
     iterators.push_back(std::make_unique<MemTableIterator>(*activeMemTable_));
 
-    for (const auto inputPaths = selectScanTables(*manifest_, dataDirectory_, start, end);
-         const auto& path : inputPaths)
-        iterators.push_back(std::make_unique<SSTableIterator>(path.string()));
+    const auto inputPaths = selectScanTables(*manifest_, dataDirectory_, start, end);
+    for (const auto& path : inputPaths)
+        iterators.push_back(std::make_unique<SSTableIterator>(path));
 
     if (readSeq == std::numeric_limits<uint64_t>::max())
         readSeq = nextSeq_ - 1;
-    std::ranges::for_each(iterators, [&readSeq](std::unique_ptr<Iterator>& iter)
-                          { iter = std::make_unique<SnapshotIterator>(std::move(iter), readSeq); });
+    for (auto& iterator : iterators)
+        iterator = std::make_unique<SnapshotIterator>(std::move(iterator), readSeq);
 
     auto result = mergeAll(iterators);
     latestVisiblePerKey(result);
@@ -295,34 +301,27 @@ std::vector<Record> DB::scan(const std::string_view start, const std::string_vie
     return std::ranges::to<std::vector>(visibleRecords);
 }
 
-uint64_t DB::getSnapshot() const
+uint64_t DB::registerSnapshot() const
 {
-    compactSeqs_.insert(nextSeq_ - 1);
-    return nextSeq_ - 1;
+    const uint64_t sequence = nextSeq_ - 1;
+    activeSnapshotSequences_->insert(sequence);
+    return sequence;
 }
 
-void DB::releaseSnapshot(const uint64_t seq)
-{
-    auto it = compactSeqs_.find(seq);
-    if (it != compactSeqs_.end())
-        compactSeqs_.erase(it);
-}
+Snapshot DB::snapshot() { return {activeSnapshotSequences_, registerSnapshot()}; }
 
-Snapshot DB::snapshot() { return {this, getSnapshot()}; }
-
-size_t DB::activeSnapshotCount() const { return compactSeqs_.size(); }
+size_t DB::activeSnapshotCount() const { return activeSnapshotSequences_->size(); }
 
 Result DB::searchTable(const uint64_t tableNumber, const std::string_view key, const uint64_t readSeq,
                        std::string& value) const
 {
-    if (const auto iter = tables_.find(tableNumber); iter != tables_.end())
-    {
-        return iter->second->get(key, readSeq, value);
-    }
-    auto sstable = std::make_unique<SSTable>(sstablePath(dataDirectory_, tableNumber));
-    const auto res = sstable->get(key, readSeq, value);
-    tables_[tableNumber] = std::move(sstable);
-    return res;
+    if (const auto cachedTable = tableCache_.find(tableNumber); cachedTable != tableCache_.end())
+        return cachedTable->second->get(key, readSeq, value);
+
+    auto table = std::make_unique<SSTable>(sstablePath(dataDirectory_, tableNumber));
+    const Result result = table->get(key, readSeq, value);
+    tableCache_.emplace(tableNumber, std::move(table));
+    return result;
 }
 
 bool DB::searchSSTables(const std::string_view key, const uint64_t readSeq, std::string& value) const
@@ -354,46 +353,55 @@ bool DB::searchSSTables(const std::string_view key, const uint64_t readSeq, std:
     return false;
 }
 
-void DB::compactLevel(const uint64_t n)
+void DB::compactLevel(const uint64_t levelNumber)
 {
     std::vector<uint64_t> removedTables;
-    if (n == 0)
+    if (levelNumber == 0)
     {
         if (manifest_->level(0).empty())
             return;
 
-        const TableNumbers selectedTables = selectCompactionTables(*manifest_);
+        const TableNumbers selectedTables = selectLevelZeroCompactionTables(*manifest_);
         removedTables.assign(selectedTables.begin(), selectedTables.end());
     }
     else
     {
-        auto& tables = manifest_->level(n);
-        if (tables.empty())
+        removedTables = selectHigherLevelCompactionTables(levelNumber);
+        if (removedTables.empty())
             return;
-        TableMeta table;
-        if (!cursors_.contains(n))
-        {
-            cursors_.emplace(n, tables.front().maxKey);
-            table = tables.front();
-        }
-        else
-        {
-            auto tableIt = std::ranges::upper_bound(tables, cursors_[n], std::less{}, &TableMeta::minKey);
-            if (tableIt == tables.end())
-                tableIt = tables.begin();
-            table = *tableIt;
-        }
-        cursors_[n] = table.maxKey;
-        std::vector<TableMeta> selectedTables;
-        selectedTables.push_back(table);
-        getNextCrossTable(selectedTables, n + 1);
-
-        removedTables.reserve(selectedTables.size());
-        for (const auto& removeTable : selectedTables)
-            removedTables.push_back(removeTable.number);
     }
 
-    compactRange(removedTables, n + 1);
+    compactRange(removedTables, levelNumber + 1);
+}
+
+std::vector<uint64_t> DB::selectHigherLevelCompactionTables(const uint64_t levelNumber)
+{
+    const auto& levelTables = manifest_->level(levelNumber);
+    if (levelTables.empty())
+        return {};
+
+    TableMeta selectedTable;
+    if (const auto cursor = compactionCursors_.find(levelNumber); cursor == compactionCursors_.end())
+    {
+        selectedTable = levelTables.front();
+    }
+    else
+    {
+        auto table = std::ranges::upper_bound(levelTables, cursor->second, std::less{}, &TableMeta::minKey);
+        if (table == levelTables.end())
+            table = levelTables.begin();
+        selectedTable = *table;
+    }
+    compactionCursors_.insert_or_assign(levelNumber, selectedTable.maxKey);
+
+    std::vector<TableMeta> selectedTables{selectedTable};
+    appendOverlappingTables(selectedTables, levelNumber + 1);
+
+    std::vector<uint64_t> tableNumbers;
+    tableNumbers.reserve(selectedTables.size());
+    for (const TableMeta& table : selectedTables)
+        tableNumbers.push_back(table.number);
+    return tableNumbers;
 }
 
 void DB::maybeCompact()
@@ -405,10 +413,10 @@ void DB::maybeCompact()
             compactLevel(0);
             continue;
         }
-        auto overLevel = getFirstOverLevel();
-        if (!overLevel)
+        const auto overBudgetLevel = firstOverBudgetLevel();
+        if (!overBudgetLevel)
             break;
-        compactLevel(*overLevel);
+        compactLevel(*overBudgetLevel);
     }
 }
 
@@ -418,7 +426,7 @@ void DB::compactRange(const std::vector<uint64_t>& removedTables, const uint64_t
     auto iterators = openTableIterators(inputPaths);
 
     std::vector<Record> records = mergeAll(iterators);
-    retainForCompaction(records, smallestActiveSnapShot());
+    retainForCompaction(records, smallestActiveSnapshot());
     const std::vector<TableMeta> outputTables =
         writeCompactionOutput(*manifest_, dataDirectory_, std::span(records), compactionSliceBytes_);
 
@@ -428,79 +436,85 @@ void DB::compactRange(const std::vector<uint64_t>& removedTables, const uint64_t
     for (const auto& inputPath : inputPaths)
         removeFile(inputPath, "remove old sst file failed");
 
-    for (auto tableNumber : removedTables)
-        tables_.erase(tableNumber);
+    for (const uint64_t tableNumber : removedTables)
+        tableCache_.erase(tableNumber);
 }
 
-uint64_t DB::levelBytes(const uint64_t level) const
+uint64_t DB::levelSizeBytes(const uint64_t levelNumber) const
 {
-    auto& tables = manifest_->level(level);
+    const auto& tables = manifest_->level(levelNumber);
     uint64_t totalBytes = 0;
-    for (const auto& table : tables)
+    for (const TableMeta& table : tables)
         totalBytes += table.size;
     return totalBytes;
 }
 
-uint64_t DB::budgetFor(const uint64_t n) const
+uint64_t DB::levelCompactionBudget(const uint64_t levelNumber) const
 {
-    uint64_t totalBytes = compactBaseThresholdBytes_;
-    for (uint64_t i = 2; i <= n; ++i)
-        totalBytes *= 10;
-    return totalBytes;
+    uint64_t budget = compactionBaseThresholdBytes_;
+    for (uint64_t level = 2; level <= levelNumber; ++level)
+        budget *= 10;
+    return budget;
 }
 
-std::optional<uint64_t> DB::getFirstOverLevel() const
+std::optional<uint64_t> DB::firstOverBudgetLevel() const
 {
-    for (uint64_t i = 1; i < manifest_->levelCount(); ++i)
+    for (uint64_t levelNumber = 1; levelNumber < manifest_->levelCount(); ++levelNumber)
     {
-        if (budgetFor(i) < levelBytes(i))
-            return i;
+        if (levelCompactionBudget(levelNumber) < levelSizeBytes(levelNumber))
+            return levelNumber;
     }
     return std::nullopt;
 }
 
-void DB::getNextCrossTable(std::vector<TableMeta>& tables, const uint64_t nextLevel) const
+void DB::appendOverlappingTables(std::vector<TableMeta>& tables, const uint64_t nextLevel) const
 {
     if (nextLevel >= manifest_->levelCount())
         return;
 
-    auto& nextLevelTables = manifest_->level(nextLevel);
+    const auto& nextLevelTables = manifest_->level(nextLevel);
     tables.reserve(nextLevelTables.size());
-    const auto curTable = tables.front();
-    for (const auto& table : nextLevelTables)
+    const TableMeta selectedTable = tables.front();
+    for (const TableMeta& table : nextLevelTables)
     {
-        if (rangesOverlap(table, curTable.minKey, curTable.maxKey))
+        if (rangesOverlap(table, selectedTable.minKey, selectedTable.maxKey))
             tables.push_back(table);
     }
 }
 
-uint64_t DB::smallestActiveSnapShot() const { return compactSeqs_.empty() ? nextSeq_ - 1 : *compactSeqs_.begin(); }
-
-Snapshot::Snapshot(Snapshot&& other) noexcept
+uint64_t DB::smallestActiveSnapshot() const
 {
-    db_ = other.db_;
-    seq_ = other.seq_;
-    other.db_ = nullptr;
+    return activeSnapshotSequences_->empty() ? nextSeq_ - 1 : *activeSnapshotSequences_->begin();
 }
+
+Snapshot::Snapshot(Snapshot&& other) noexcept : activeSequences_(std::move(other.activeSequences_)), seq_(other.seq_) {}
 
 Snapshot& Snapshot::operator=(Snapshot&& other) noexcept
 {
     if (&other == this)
         return *this;
-    if (db_)
-        db_->releaseSnapshot(seq_);
-    db_ = other.db_;
+    release();
+    activeSequences_ = std::move(other.activeSequences_);
     seq_ = other.seq_;
-    other.db_ = nullptr;
     return *this;
 }
 
-Snapshot::~Snapshot()
+Snapshot::~Snapshot() { release(); }
+
+void Snapshot::release()
 {
-    if (db_)
-        db_->releaseSnapshot(seq_);
+    if (const auto activeSequences = activeSequences_.lock())
+    {
+        const auto sequence = activeSequences->find(seq_);
+        if (sequence != activeSequences->end())
+            activeSequences->erase(sequence);
+    }
+    activeSequences_.reset();
 }
 
 uint64_t Snapshot::seq() const { return seq_; }
 
-Snapshot::Snapshot(DB* db, const uint64_t seq) : db_(db), seq_(seq) {}
+Snapshot::Snapshot(std::weak_ptr<std::multiset<uint64_t>> activeSequences, const uint64_t seq)
+    : activeSequences_(std::move(activeSequences)), seq_(seq)
+{
+}

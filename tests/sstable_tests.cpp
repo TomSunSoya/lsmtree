@@ -135,6 +135,36 @@ TEST(SSTableTest, BuildAndReadRecordsFromMemTable)
     expectMissing(sstable, "gamma");
 }
 
+TEST(SSTableTest, GetReportsCorruptRecordLengthInsteadOfMissingKey)
+{
+    const std::filesystem::path walPath("sstable_tests_corrupt_record_length.wal");
+    const std::filesystem::path sstablePath("sstable_tests_corrupt_record_length.sst");
+    const ScopedPathCleanup cleanup({walPath, sstablePath});
+
+    {
+        MemTable memTable(walPath.string());
+        ASSERT_NO_FATAL_FAILURE(expectPut(memTable, "alpha", "one", 1));
+        ASSERT_NO_THROW(SSTable::build(memTable, sstablePath));
+    }
+
+    {
+        std::fstream file(sstablePath, std::ios::binary | std::ios::in | std::ios::out);
+        ASSERT_TRUE(file.is_open());
+        constexpr uint32_t impossibleKeySize = 1024;
+        constexpr std::streamoff keySizeOffset = sizeof(uint8_t) + sizeof(uint64_t);
+        file.seekp(keySizeOffset, std::ios::beg);
+        ASSERT_TRUE(file.write(reinterpret_cast<const char*>(&impossibleKeySize), sizeof(impossibleKeySize)));
+    }
+
+    EXPECT_THROW(
+        {
+            const SSTable table(sstablePath);
+            std::string value;
+            static_cast<void>(table.get("alpha", kReadLatest, value));
+        },
+        std::exception);
+}
+
 TEST(SSTableTest, BuildPersistsTombstoneAndKeepsScanningUnrelatedKeys)
 {
     const std::filesystem::path walPath("sstable_tests_tombstone.wal");

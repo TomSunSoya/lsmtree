@@ -50,6 +50,7 @@ class MemTable
 
     friend class MemTableIterator;
 
+    void applyToMemory(const std::string& key, const Entry& entry);
     bool restoreFromWAL();
     static std::vector<std::pair<std::string, Entry>> parseWALRecords(std::string_view content, size_t& lastGoodOffset);
 

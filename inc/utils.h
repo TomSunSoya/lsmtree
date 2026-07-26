@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <memory>
 #include <optional>
@@ -35,6 +36,14 @@ struct Record
     Type type;
     std::string value;
 };
+
+// type(1) + sequence(8) + key size(4) + value size(4)
+constexpr uint64_t kEncodedRecordHeaderSize = sizeof(uint8_t) + sizeof(uint64_t) + 2 * sizeof(uint32_t);
+
+[[nodiscard]] inline uint64_t encodedRecordSize(const Record& record)
+{
+    return kEncodedRecordHeaderSize + record.key.size() + record.value.size();
+}
 
 struct Index
 {
@@ -72,12 +81,12 @@ constexpr std::string_view kSSTableSuffix = ".sst";
 [[nodiscard]] std::optional<uint64_t> parseNumberedFile(std::string_view filename, std::string_view prefix,
                                                         std::string_view suffix);
 
-[[nodiscard]] std::filesystem::path walPath(const std::filesystem::path& dataDir, uint64_t fileNumber);
-[[nodiscard]] std::filesystem::path sstablePath(const std::filesystem::path& dataDir, uint64_t fileNumber);
+[[nodiscard]] std::filesystem::path walPath(const std::filesystem::path& dataDirectory, uint64_t fileNumber);
+[[nodiscard]] std::filesystem::path sstablePath(const std::filesystem::path& dataDirectory, uint64_t fileNumber);
 void removeFile(const std::filesystem::path& path, const char* message);
 void writeAll(int fd, const void* data, std::size_t size);
 
-inline bool rangesOverlap(const TableMeta& table, const std::string_view minKey, const std::string_view maxKey)
+inline bool rangesOverlap(const TableMeta& table, std::string_view minKey, std::string_view maxKey)
 {
     return minKey <= table.maxKey && table.minKey <= maxKey;
 }
@@ -96,7 +105,7 @@ class FdGuard
     void close();
 
   private:
-    int fd_;
+    int fd_ = -1;
 };
 
 class FileWriter
@@ -136,6 +145,8 @@ class SnapshotIterator : public Iterator
     void advance() override;
 
   private:
+    void skipInvisibleRecords();
+
     std::unique_ptr<Iterator> iterator_;
     uint64_t readSeq_;
 };
@@ -143,7 +154,4 @@ class SnapshotIterator : public Iterator
 std::vector<Record> mergeAll(std::vector<std::unique_ptr<Iterator>>& sources);
 
 void latestVisiblePerKey(std::vector<Record>& records);
-void retainForCompaction(std::vector<Record>& records, uint64_t Smin);
-
-// type(1) + seq(8) + keySize(4) + valueSize(4)
-constexpr uint64_t kEncodedRecordHeaderSize = sizeof(uint8_t) + 2 * sizeof(uint32_t) + sizeof(uint64_t);
+void retainForCompaction(std::vector<Record>& records, uint64_t oldestSnapshotSequence);

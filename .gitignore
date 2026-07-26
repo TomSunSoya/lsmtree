@@ -1,4 +1,6 @@
 cmake-build-*/
+build/
+*_tests_*
 .idea/
 .DS_Store
 .omo/

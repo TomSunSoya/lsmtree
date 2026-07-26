@@ -423,6 +423,19 @@ TEST(MemTableTest, WALRestoresExistingRecords)
     ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, walContent("1,P,12,5,alpha=3,one\n1,P,47,4,beta=3,two\n")));
 }
 
+TEST(MemTableTest, WALReplayRestoresMemTableSizeBytes)
+{
+    const std::filesystem::path logPath("memtable_tests_restore_size_bytes.wal");
+    const ScopedPathCleanup cleanup(logPath);
+    const std::string content = walContent("1,P,12,5,alpha=3,one\n1,D,47,4,beta=0,\n");
+    ASSERT_NO_FATAL_FAILURE(writeFile(logPath, content));
+
+    const MemTable table(logPath.string());
+
+    EXPECT_EQ(entrySize("alpha", "one") + entrySize("beta", ""), table.size_bytes())
+        << "replayed records must participate in the same flush threshold accounting as new writes";
+}
+
 TEST(MemTableTest, WALRestoresEveryRecordFromCompleteMultiRecordBatch)
 {
     const std::filesystem::path logPath("memtable_tests_restore_complete_batch.wal");
@@ -440,6 +453,27 @@ TEST(MemTableTest, WALRestoresEveryRecordFromCompleteMultiRecordBatch)
     }
 
     ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, content));
+}
+
+TEST(MemTableTest, WALRejectsCorruptionBeforeACompleteLaterBatchWithoutTruncatingIt)
+{
+    const std::filesystem::path logPath("memtable_tests_reject_mid_file_corruption.wal");
+    const ScopedPathCleanup cleanup(logPath);
+    std::string content = walContent("1,P,5,5,alpha=3,one\n1,P,6,4,beta=3,two\n");
+
+    // Damage the first committed batch while leaving a later complete batch in
+    // place. This is not a torn tail and must not be silently repaired by
+    // discarding every byte after the corruption.
+    const auto firstOperation = content.find("P,5");
+    ASSERT_NE(std::string::npos, firstOperation);
+    content[firstOperation] = 'X';
+    ASSERT_NO_FATAL_FAILURE(writeFile(logPath, content));
+
+    EXPECT_THROW({ const MemTable table(logPath.string()); }, std::runtime_error);
+
+    std::string contentAfterOpen;
+    ASSERT_NO_FATAL_FAILURE(test_support::readFile(logPath, contentAfterOpen));
+    EXPECT_EQ(content, contentAfterOpen) << "mid-file corruption must not be mistaken for a disposable WAL tail";
 }
 
 TEST(MemTableTest, WALDropsEntireIncompleteFinalBatch)
@@ -493,6 +527,35 @@ TEST(MemTableTest, WALReplayKeepsLatestValueForDuplicateKey)
     }
 
     ASSERT_NO_FATAL_FAILURE(expectFileContent(logPath, walContent("1,P,1,1,k=3,old\n1,P,2,1,k=3,new\n")));
+}
+
+TEST(MemTableTest, DuplicateKeyAndSequenceHasSameReplacementSemanticsAfterReplay)
+{
+    const std::filesystem::path logPath("memtable_tests_restore_duplicate_key_and_seq.wal");
+    const ScopedPathCleanup cleanup(logPath);
+    const std::vector<Record> operations{
+        {"key", 7, Type::VALUE, "old"},
+        {"key", 7, Type::VALUE, "replacement"},
+    };
+
+    {
+        MemTable table(logPath.string());
+
+        ASSERT_TRUE(table.applyBatch(operations));
+        EXPECT_EQ(1u, table.size());
+        EXPECT_EQ(entrySize("key", "replacement"), table.size_bytes());
+        EXPECT_EQ(7, table.getMaxWALSeq());
+        ASSERT_NO_FATAL_FAILURE(expectGet(table, "key", "replacement"));
+    }
+
+    {
+        const MemTable table(logPath.string());
+
+        EXPECT_EQ(1u, table.size());
+        EXPECT_EQ(entrySize("key", "replacement"), table.size_bytes());
+        EXPECT_EQ(7, table.getMaxWALSeq());
+        ASSERT_NO_FATAL_FAILURE(expectGet(table, "key", "replacement"));
+    }
 }
 
 TEST(MemTableTest, WALReplayKeepsTombstoneForDeletedKey)

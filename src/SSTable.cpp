@@ -13,6 +13,7 @@ namespace
 {
 constexpr uint64_t kIndexMetadataSize = sizeof(uint32_t) + sizeof(uint64_t);
 constexpr size_t kFooterSize = 3 * sizeof(uint64_t);
+constexpr double kBloomFalsePositiveProbability = 0.01;
 
 struct Footer
 {
@@ -24,9 +25,13 @@ struct Footer
 Footer readFooter(std::ifstream& input)
 {
     input.seekg(-static_cast<std::streamoff>(kFooterSize), std::ios::end);
+    if (!input)
+        throw std::runtime_error("Corrupt SSTable footer");
 
     std::array<std::byte, kFooterSize> buffer{};
     input.read(reinterpret_cast<char*>(buffer.data()), buffer.size());
+    if (!input)
+        throw std::runtime_error("Corrupt SSTable footer");
 
     Footer footer{};
     std::memcpy(&footer.recordsSize, buffer.data(), sizeof(footer.recordsSize));
@@ -36,55 +41,79 @@ Footer readFooter(std::ifstream& input)
     return footer;
 }
 
-std::optional<Record> readRecord(std::ifstream& input)
+void validateFooter(const Footer& footer, const uint64_t fileSize)
 {
-    char type = 0;
-    if (!input.read(&type, sizeof(type)))
-        return std::nullopt;
+    if (fileSize < kFooterSize)
+        throw std::runtime_error("Corrupt SSTable size");
 
-    uint64_t seq = 0;
-    if (!input.read(reinterpret_cast<char*>(&seq), sizeof(seq)))
-        return std::nullopt;
+    uint64_t remaining = fileSize - kFooterSize;
+    if (footer.recordsSize == 0 || footer.recordsSize > remaining)
+        throw std::runtime_error("Corrupt SSTable records size");
+    remaining -= footer.recordsSize;
+    if (footer.bloomSize > remaining)
+        throw std::runtime_error("Corrupt SSTable Bloom filter size");
+    remaining -= footer.bloomSize;
+    if (footer.indexSize != remaining)
+        throw std::runtime_error("Corrupt SSTable index size");
+}
+
+Record readRecord(std::ifstream& input, const uint64_t availableBytes)
+{
+    if (availableBytes < kEncodedRecordHeaderSize)
+        throw std::runtime_error("Corrupt SSTable record header");
+
+    uint8_t type = 0;
+    if (!input.read(reinterpret_cast<char*>(&type), sizeof(type)))
+        throw std::runtime_error("Corrupt SSTable record type");
+
+    uint64_t sequence = 0;
+    if (!input.read(reinterpret_cast<char*>(&sequence), sizeof(sequence)))
+        throw std::runtime_error("Corrupt SSTable record sequence");
 
     uint32_t keySize = 0;
     uint32_t valueSize = 0;
     if (!input.read(reinterpret_cast<char*>(&keySize), sizeof(keySize)))
-        return std::nullopt;
+        throw std::runtime_error("Corrupt SSTable key size");
     if (!input.read(reinterpret_cast<char*>(&valueSize), sizeof(valueSize)))
-        return std::nullopt;
+        throw std::runtime_error("Corrupt SSTable value size");
+
+    if (type > static_cast<uint8_t>(Type::TOMBSTONE))
+        throw std::runtime_error("Corrupt SSTable record type");
+
+    const uint64_t payloadBytes = availableBytes - kEncodedRecordHeaderSize;
+    if (keySize > payloadBytes || valueSize > payloadBytes - keySize)
+        throw std::runtime_error("Corrupt SSTable record length");
 
     std::string key(keySize, '\0');
     std::string value(valueSize, '\0');
     if (!input.read(key.data(), keySize))
-        return std::nullopt;
+        throw std::runtime_error("Corrupt SSTable record key");
     if (!input.read(value.data(), valueSize))
-        return std::nullopt;
+        throw std::runtime_error("Corrupt SSTable record value");
 
-    return Record{std::move(key), seq, static_cast<Type>(type), std::move(value)};
+    return Record{std::move(key), sequence, static_cast<Type>(type), std::move(value)};
 }
 
-std::optional<Index> readIndex(std::ifstream& input)
+Index readIndex(std::ifstream& input, const uint64_t availableBytes)
 {
+    if (availableBytes < kIndexMetadataSize)
+        throw std::runtime_error("Corrupt SSTable index header");
+
     uint32_t keySize = 0;
     if (!input.read(reinterpret_cast<char*>(&keySize), sizeof(keySize)))
-        return std::nullopt;
+        throw std::runtime_error("Corrupt SSTable index key size");
+    if (keySize > availableBytes - kIndexMetadataSize)
+        throw std::runtime_error("Corrupt SSTable index length");
 
     std::string key(keySize, '\0');
     if (!input.read(key.data(), keySize))
-        return std::nullopt;
+        throw std::runtime_error("Corrupt SSTable index key");
 
     uint64_t offset = 0;
     if (!input.read(reinterpret_cast<char*>(&offset), sizeof(offset)))
-        return std::nullopt;
+        throw std::runtime_error("Corrupt SSTable index offset");
 
     return Index{keySize, std::move(key), offset};
-}
-
-uint64_t serializedRecordSize(const std::optional<Record>& record)
-{
-    if (!record)
-        return 0;
-    return kEncodedRecordHeaderSize + record->key.size() + record->value.size();
 }
 
 uint64_t serializedIndexSize(const Index& index) { return kIndexMetadataSize + index.key.size(); }
@@ -152,25 +181,33 @@ SSTable::SSTable(std::filesystem::path path) : path_(std::move(path))
         throw std::runtime_error("Could not open file: " + path_.string());
 
     const Footer footer = readFooter(input);
+    validateFooter(footer, std::filesystem::file_size(path_));
     recordsSize_ = footer.recordsSize;
     bloomSize_ = footer.bloomSize;
     indexSize_ = footer.indexSize;
 
     input.seekg(recordsSize_, std::ios::beg);
+    if (!input)
+        throw std::runtime_error("Corrupt SSTable Bloom filter offset");
     std::vector<std::byte> bloomBytes(bloomSize_);
-    input.read(reinterpret_cast<char*>(bloomBytes.data()), bloomSize_);
+    if (!input.read(reinterpret_cast<char*>(bloomBytes.data()), static_cast<std::streamsize>(bloomSize_)))
+        throw std::runtime_error("Corrupt SSTable Bloom filter");
     bloomFilter_ = std::make_unique<BloomFilter>(BloomFilter::fromBytes(bloomBytes));
     indices_ = readSparseIndex();
+    if (indices_.empty())
+        throw std::runtime_error("Corrupt SSTable sparse index");
 }
 
 Result SSTable::get(const std::string_view key, uint64_t readSeq, std::string& value) const
 {
-    if (!std::filesystem::exists(path_) || !bloomFilter_->mightContain(key))
+    if (!std::filesystem::exists(path_))
+        throw std::runtime_error("SSTable file disappeared: " + path_.string());
+    if (!bloomFilter_->mightContain(key))
         return Result::ABSENT;
 
     std::ifstream input(path_, std::ios::binary);
     if (!input.is_open())
-        return Result::ABSENT;
+        throw std::runtime_error("Could not open file: " + path_.string());
 
     const auto block = getBlock(key);
     if (!block)
@@ -181,19 +218,16 @@ Result SSTable::get(const std::string_view key, uint64_t readSeq, std::string& v
     uint64_t currentOffset = firstIndex.offset;
     while (currentOffset < blockEnd)
     {
-        const auto record = readRecord(input);
-        if (!record)
+        const Record record = readRecord(input, blockEnd - currentOffset);
+        currentOffset += encodedRecordSize(record);
+        if (record.key > key)
             break;
-
-        currentOffset += serializedRecordSize(record);
-        if (record->key > key)
-            break;
-        if (record->key < key || record->seq > readSeq)
+        if (record.key < key || record.seq > readSeq)
             continue;
 
-        if (record->type != Type::VALUE)
+        if (record.type != Type::VALUE)
             return Result::TOMBSTONE;
-        value = record->value;
+        value = record.value;
         return Result::VALUE;
     }
     return Result::ABSENT;
@@ -210,13 +244,17 @@ std::vector<Index> SSTable::readSparseIndex() const
     uint64_t bytesRead = 0;
     while (bytesRead < indexSize_)
     {
-        const auto index = readIndex(input);
-        if (!index)
-            break;
+        Index index = readIndex(input, indexSize_ - bytesRead);
+        if (index.offset >= recordsSize_)
+            throw std::runtime_error("Corrupt SSTable index offset");
+        if (!indices.empty() && (index.offset <= indices.back().offset || index.key < indices.back().key))
+            throw std::runtime_error("Corrupt SSTable index order");
 
-        indices.push_back(*index);
-        bytesRead += serializedIndexSize(*index);
+        bytesRead += serializedIndexSize(index);
+        indices.push_back(std::move(index));
     }
+    if (!indices.empty() && indices.front().offset != 0)
+        throw std::runtime_error("Corrupt SSTable first index offset");
     return indices;
 }
 
@@ -231,13 +269,13 @@ std::optional<std::pair<Index, uint64_t>> SSTable::getBlock(const std::string_vi
     if (position == indices_.begin() && position->key > key)
         return std::nullopt;
 
-    if (position == indices_.end() || position != indices_.begin() && position->key >= key)
+    if (position == indices_.end() || (position != indices_.begin() && position->key >= key))
         position = std::prev(position);
-    auto it = position;
-    while (it != indices_.end() && it->key <= key)
-        ++it;
+    auto nextBlock = position;
+    while (nextBlock != indices_.end() && nextBlock->key <= key)
+        ++nextBlock;
 
-    const uint64_t blockEnd = it == indices_.end() ? recordsSize_ : it->offset;
+    const uint64_t blockEnd = nextBlock == indices_.end() ? recordsSize_ : nextBlock->offset;
     return std::make_pair(*position, blockEnd);
 }
 
@@ -246,61 +284,61 @@ uint64_t SSTable::addRecordToFile(const std::span<Record> records, const std::fi
     if (records.empty())
         throw std::runtime_error("Records cannot be empty");
 
-    uint64_t size = 0;
+    uint64_t fileSize = 0;
 
-    BloomFilter bloomFilter(records.size(), 0.01);
+    BloomFilter bloomFilter(records.size(), kBloomFalsePositiveProbability);
     FileWriter writer(path);
 
     std::vector<Index> indices;
     uint64_t recordsSize = 0;
     uint64_t currentBlockSize = 0;
-    for (const auto& [key, seq, type, value] : records)
+    for (const Record& record : records)
     {
         if (recordsSize == 0 || currentBlockSize > kBlockSize)
         {
             currentBlockSize = 0;
-            indices.emplace_back(key.size(), key, recordsSize);
+            indices.emplace_back(record.key.size(), record.key, recordsSize);
         }
 
-        const uint64_t bytesWritten = writer.add({key, seq, type, value});
+        const uint64_t bytesWritten = writer.add(record);
         recordsSize += bytesWritten;
         currentBlockSize += bytesWritten;
-        bloomFilter.add(key);
-        size += bytesWritten;
+        bloomFilter.add(record.key);
+        fileSize += bytesWritten;
     }
 
     const std::vector<std::byte> bloomBytes = BloomFilter::Serialize(bloomFilter);
     writeAll(writer.getFd(), bloomBytes.data(), bloomBytes.size());
-    size += bloomBytes.size();
+    fileSize += bloomBytes.size();
 
     uint64_t indexSize = 0;
     for (const Index& index : indices)
         indexSize += writeIndex(writer, index);
-    size += indexSize;
+    fileSize += indexSize;
 
     writeFooter(writer, recordsSize, bloomBytes.size(), indexSize);
-    size += sizeof(recordsSize) + sizeof(size_t) + sizeof(indexSize);
+    fileSize += kFooterSize;
     writer.finish();
-    return size;
+    return fileSize;
 }
 
 SSTableIterator::SSTableIterator(std::filesystem::path path)
 {
-    if (!std::filesystem::exists(path))
+    if (!std::filesystem::exists(path) || !std::filesystem::is_regular_file(path))
         throw std::runtime_error("Invalid path");
 
     input_.open(path, std::ios::binary);
     if (!input_.is_open())
         throw std::runtime_error("Failed to open SSTable file!");
 
-    recordsSize_ = readFooter(input_).recordsSize;
+    const Footer footer = readFooter(input_);
+    validateFooter(footer, std::filesystem::file_size(path));
+    recordsSize_ = footer.recordsSize;
     input_.seekg(0, std::ios::beg);
+    if (!input_)
+        throw std::runtime_error("Corrupt SSTable records offset");
 
-    if (currentPosition_ < recordsSize_)
-    {
-        currentRecord_ = readRecord(input_);
-        currentPosition_ += serializedRecordSize(currentRecord_);
-    }
+    loadNextRecord();
 }
 
 bool SSTableIterator::valid() const { return currentRecord_.has_value(); }
@@ -311,14 +349,16 @@ const Record& SSTableIterator::current() const
     return *currentRecord_;
 }
 
-void SSTableIterator::advance()
+void SSTableIterator::advance() { loadNextRecord(); }
+
+void SSTableIterator::loadNextRecord()
 {
-    if (valid() && currentPosition_ < recordsSize_)
+    if (currentPosition_ >= recordsSize_)
     {
-        currentRecord_ = readRecord(input_);
-        currentPosition_ += serializedRecordSize(currentRecord_);
+        currentRecord_.reset();
         return;
     }
 
-    currentRecord_.reset();
+    currentRecord_ = readRecord(input_, recordsSize_ - currentPosition_);
+    currentPosition_ += encodedRecordSize(*currentRecord_);
 }

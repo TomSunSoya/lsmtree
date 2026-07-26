@@ -32,7 +32,7 @@ struct Decision
 };
 
 // Consulted once per syscall. `size` is the requested byte count for Write, 0 for Fsync.
-using Policy = std::function<Decision(Op op, int fd, std::size_t size)>;
+using Policy = std::function<Decision(Op operation, int fileDescriptor, std::size_t size)>;
 
 void install(Policy policy);
 void clear();
@@ -50,12 +50,12 @@ class ScopedPolicy
 };
 
 // Fails the nth (1-based) call of the given kind; every other call passes through.
-[[nodiscard]] Policy failNth(Op op, unsigned n, int errnoValue);
+[[nodiscard]] Policy failNth(Op operation, unsigned occurrence, int errnoValue);
 
 // Fails every call of the given kind.
-[[nodiscard]] Policy failEvery(Op op, int errnoValue);
+[[nodiscard]] Policy failEvery(Op operation, int errnoValue);
 
 // The injected syscalls.
-ssize_t write(int fd, const void* data, std::size_t size);
-int fsync(int fd);
+ssize_t write(int fileDescriptor, const void* data, std::size_t size);
+int fsync(int fileDescriptor);
 } // namespace fault

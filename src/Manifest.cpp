@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <fstream>
-#include <iterator>
 #include <ranges>
 #include <stdexcept>
 #include <utility>
@@ -18,11 +17,11 @@ template <typename Value> void readValue(std::ifstream& input, Value& value, con
 
 std::string readKey(std::ifstream& input, const char* sizeErrorMessage, const char* keyErrorMessage)
 {
-    uint32_t size = 0;
-    readValue(input, size, sizeErrorMessage);
+    uint32_t keySize = 0;
+    readValue(input, keySize, sizeErrorMessage);
 
-    std::string key(size, 0);
-    input.read(key.data(), size);
+    std::string key(keySize, '\0');
+    input.read(key.data(), keySize);
     if (!input)
         throw std::ios_base::failure(keyErrorMessage);
     return key;
@@ -30,12 +29,13 @@ std::string readKey(std::ifstream& input, const char* sizeErrorMessage, const ch
 
 TableMeta readTable(std::ifstream& input)
 {
-    uint64_t number = 0, size = 0;
-    readValue(input, number, "failed to read table's number");
-    readValue(input, size, "failed to read table's size");
+    uint64_t tableNumber = 0;
+    uint64_t tableSize = 0;
+    readValue(input, tableNumber, "failed to read table's number");
+    readValue(input, tableSize, "failed to read table's size");
     std::string minKey = readKey(input, "failed to read minKey size", "failed to read minKey");
     std::string maxKey = readKey(input, "failed to read maxKey size", "failed to read maxKey");
-    return {number, size, std::move(minKey), std::move(maxKey)};
+    return {tableNumber, tableSize, std::move(minKey), std::move(maxKey)};
 }
 
 template <typename Value> void writeValue(const FileWriter& writer, const Value& value)
@@ -45,8 +45,8 @@ template <typename Value> void writeValue(const FileWriter& writer, const Value&
 
 void writeKey(const FileWriter& writer, const std::string& key)
 {
-    const uint32_t size = key.length();
-    writeValue(writer, size);
+    const uint32_t keySize = key.length();
+    writeValue(writer, keySize);
     writeAll(writer.getFd(), key.data(), key.length());
 }
 } // namespace
@@ -56,11 +56,12 @@ void writeKey(const FileWriter& writer, const std::string& key)
 //   uint64_t log_number
 //   uint8_t  version
 //   uint64_t next_table_number
-//   uint64_t lastSeq
+//   uint64_t last_sequence
 //   repeated level_count times:
 //     uint64_t table_count
 //     repeated table_count times:
 //       uint64_t table_number
+//       uint64_t table_size
 //       uint32_t min_key_size
 //       byte[min_key_size] min_key
 //       uint32_t max_key_size
@@ -69,9 +70,16 @@ void writeKey(const FileWriter& writer, const std::string& key)
 // newlines, and embedded NUL bytes.
 Manifest::Manifest(std::filesystem::path path) : path_(std::move(path))
 {
+    if (std::error_code ec; !std::filesystem::exists(path_, ec))
+    {
+        if (ec)
+            throw std::system_error(ec, "failed to inspect MANIFEST");
+        return;
+    }
+
     std::ifstream input(path_, std::ios::binary);
     if (!input)
-        return;
+        throw std::ios_base::failure("MANIFEST exists but cannot be opened!");
 
     uint64_t levelCount = 0;
     uint8_t formatVersion = 0;

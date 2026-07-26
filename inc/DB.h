@@ -2,6 +2,7 @@
 
 #include <filesystem>
 #include <memory>
+#include <set>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -40,15 +41,15 @@ class DB
     bool searchSSTables(std::string_view key, uint64_t readSeq, std::string& value) const;
     Result searchTable(uint64_t tableNumber, std::string_view key, uint64_t readSeq, std::string& value) const;
     void maybeCompact();
-    void compactLevel(uint64_t n);
+    void compactLevel(uint64_t levelNumber);
     void compactRange(const std::vector<uint64_t>& removedTables, uint64_t targetLevel);
-    uint64_t levelBytes(uint64_t level) const;
-    uint64_t budgetFor(uint64_t n) const;
-    std::optional<uint64_t> getFirstOverLevel() const;
-    void getNextCrossTable(std::vector<TableMeta>& tables, uint64_t nextLevel) const;
-    uint64_t smallestActiveSnapShot() const;
-    [[nodiscard]] uint64_t getSnapshot() const;
-    void releaseSnapshot(uint64_t seq);
+    [[nodiscard]] std::vector<uint64_t> selectHigherLevelCompactionTables(uint64_t levelNumber);
+    [[nodiscard]] uint64_t levelSizeBytes(uint64_t levelNumber) const;
+    [[nodiscard]] uint64_t levelCompactionBudget(uint64_t levelNumber) const;
+    [[nodiscard]] std::optional<uint64_t> firstOverBudgetLevel() const;
+    void appendOverlappingTables(std::vector<TableMeta>& tables, uint64_t nextLevel) const;
+    [[nodiscard]] uint64_t smallestActiveSnapshot() const;
+    [[nodiscard]] uint64_t registerSnapshot() const;
 
     std::unique_ptr<MemTable> activeMemTable_;
     std::filesystem::path dataDirectory_;
@@ -57,11 +58,13 @@ class DB
     std::unique_ptr<Manifest> manifest_;
     uint64_t level0CompactionThreshold_;
     uint64_t compactionSliceBytes_;
-    uint64_t compactBaseThresholdBytes_;
-    std::unordered_map<uint64_t, std::string> cursors_;
-    mutable std::unordered_map<uint64_t, std::unique_ptr<SSTable>> tables_{};
+    uint64_t compactionBaseThresholdBytes_;
+    std::unordered_map<uint64_t, std::string> compactionCursors_;
+    mutable std::unordered_map<uint64_t, std::unique_ptr<SSTable>> tableCache_;
     uint64_t nextSeq_{};
-    mutable std::multiset<uint64_t> compactSeqs_{};
+    mutable std::shared_ptr<std::multiset<uint64_t>> activeSnapshotSequences_ =
+        std::make_shared<std::multiset<uint64_t>>();
+    bool writeFailed_{};
 
     friend class Snapshot;
 };
@@ -79,8 +82,9 @@ class Snapshot
 
   private:
     friend class DB;
-    Snapshot(DB* db, uint64_t seq);
+    Snapshot(std::weak_ptr<std::multiset<uint64_t>> activeSequences, uint64_t seq);
+    void release();
 
-    DB* db_;
-    uint64_t seq_;
+    std::weak_ptr<std::multiset<uint64_t>> activeSequences_;
+    uint64_t seq_{};
 };

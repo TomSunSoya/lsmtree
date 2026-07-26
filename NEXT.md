@@ -1,1 +1,0 @@
-# 崩溃注入告一段落:applyBatch 的「write → fsync → 才插 map」顺序现在有测试守着,并用变异验证过它真的会红;剩余 9 个崩溃点逐条评估后判定全会绿(框帧 + 原子发布 + 开库时的 cleanupUntrackedSSTables/cleanupOldWALs 已经覆盖),无学习价值,明确不做。下一步二选一:读 LevelDB 三块源码(db/write_batch.cc、db/log_writer.cc + log_reader.cc、db/version_set.cc 的 VersionEdit),每读一块讲给 Claude 听、被挑刺;或者直接收工。

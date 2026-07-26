@@ -3,6 +3,7 @@
 #include "FaultInjection.h"
 
 #include <cassert>
+#include <cctype>
 #include <cerrno>
 #include <fcntl.h>
 #include <fstream>
@@ -14,9 +15,15 @@
 
 namespace
 {
-constexpr std::string_view MAGIC{"LWAL", 4};
-constexpr uint8_t VERSION = 1;
-constexpr size_t kMagicSize = 4;
+constexpr std::string_view kWalMagic{"LWAL", 4};
+constexpr uint8_t kWalVersion = 1;
+constexpr size_t kWalHeaderSize = kWalMagic.size() + sizeof(kWalVersion);
+
+size_t entrySize(const std::string_view key, const Entry& entry)
+{
+    return key.size() + entry.value.size() + sizeof(entry.type) + sizeof(entry.seq);
+}
+
 std::string encodeWALRecord(const std::string& key, const uint64_t seq, const std::string& value, const Type type)
 {
     const std::string operation = type == Type::VALUE ? "P," : "D,";
@@ -32,7 +39,9 @@ std::string encodeWALRecord(const Record& record)
 class WALParser
 {
   public:
-    explicit WALParser(const std::string_view content) : content_(content) {}
+    WALParser(const std::string_view content, const size_t startPosition) : content_(content), position_(startPosition)
+    {
+    }
 
     std::vector<std::pair<std::string, Entry>> parse(size_t& lastGoodOffset)
     {
@@ -40,33 +49,17 @@ class WALParser
         while (position_ < content_.size())
         {
             lastGoodOffset = position_;
-            uint64_t batchNumber = 0;
-            if (!readLength(batchNumber) || !consume(','))
+            uint64_t recordCount = 0;
+            if (!readLength(recordCount) || !consume(','))
                 return records;
 
             std::vector<std::pair<std::string, Entry>> batchRecords;
-            for (uint64_t i = 0; i < batchNumber; ++i)
+            for (uint64_t recordIndex = 0; recordIndex < recordCount; ++recordIndex)
             {
-                std::string_view operation;
-                if (!readField(1, operation) || !consume(','))
+                const auto record = readRecord();
+                if (!record)
                     return records;
-                if (operation != "D" && operation != "P")
-                    return records;
-
-                uint64_t seq = 0;
-                if (!readLength(seq) || !consume(','))
-                    return records;
-
-                std::string_view key;
-                if (!readLengthPrefixedField(key, '='))
-                    return records;
-
-                std::string_view value;
-                if (!readLengthPrefixedField(value, '\n'))
-                    return records;
-
-                const Type type = operation == "P" ? Type::VALUE : Type::TOMBSTONE;
-                batchRecords.emplace_back(std::string(key), Entry{type, seq, std::string(value)});
+                batchRecords.push_back(*record);
             }
             records.insert(records.end(), batchRecords.begin(), batchRecords.end());
         }
@@ -76,13 +69,43 @@ class WALParser
     }
 
   private:
+    std::optional<std::pair<std::string, Entry>> readRecord()
+    {
+        std::string_view operation;
+        if (!readField(1, operation) || !consume(','))
+            return std::nullopt;
+        if (operation != "D" && operation != "P")
+            throw std::runtime_error("Corrupt WAL record operation");
+
+        uint64_t sequence = 0;
+        if (!readLength(sequence) || !consume(','))
+            return std::nullopt;
+
+        std::string_view key;
+        if (!readLengthPrefixedField(key, '='))
+            return std::nullopt;
+
+        std::string_view value;
+        if (!readLengthPrefixedField(value, '\n'))
+            return std::nullopt;
+
+        const Type type = operation == "P" ? Type::VALUE : Type::TOMBSTONE;
+        return std::pair{std::string(key), Entry{type, sequence, std::string(value)}};
+    }
+
     bool readLength(uint64_t& length)
     {
         const size_t begin = position_;
         while (position_ < content_.size() && std::isdigit(static_cast<unsigned char>(content_[position_])))
             ++position_;
 
-        if (begin == position_ || position_ == content_.size())
+        if (begin == position_)
+        {
+            if (position_ != content_.size())
+                throw std::runtime_error("Corrupt WAL record length");
+            return false;
+        }
+        if (position_ == content_.size())
             return false;
 
         try
@@ -98,8 +121,10 @@ class WALParser
 
     bool consume(const char expected)
     {
-        if (position_ >= content_.size() || content_[position_] != expected)
+        if (position_ >= content_.size())
             return false;
+        if (content_[position_] != expected)
+            throw std::runtime_error("Corrupt WAL record delimiter");
 
         ++position_;
         return true;
@@ -122,7 +147,7 @@ class WALParser
     }
 
     std::string_view content_;
-    size_t position_ = kMagicSize + 1;
+    size_t position_;
 };
 } // namespace
 
@@ -141,19 +166,19 @@ bool MemTable::put(const std::string& key, const uint64_t seq, const std::string
 Result MemTable::get(const std::string_view key, const uint64_t readSeq, std::string& value) const
 {
     const Key currentKey{std::string(key), readSeq};
-    const auto it = table_.lower_bound(currentKey);
-    if (it == table_.end() || it->first.key != key)
+    const auto entry = table_.lower_bound(currentKey);
+    if (entry == table_.end() || entry->first.key != key)
         return Result::ABSENT;
-    if (it->second.type == Type::TOMBSTONE)
+    if (entry->second.type == Type::TOMBSTONE)
         return Result::TOMBSTONE;
 
-    value = it->second.value;
+    value = entry->second.value;
     return Result::VALUE;
 }
 
 bool MemTable::remove(const std::string& key, const uint64_t seq)
 {
-    return applyBatch({Record{key, seq, Type::TOMBSTONE}});
+    return applyBatch({Record{key, seq, Type::TOMBSTONE, {}}});
 }
 
 bool MemTable::applyBatch(const std::vector<Record>& ops)
@@ -173,21 +198,26 @@ bool MemTable::applyBatch(const std::vector<Record>& ops)
         std::cerr << "Write batch failed: " << error.code().message() << std::endl;
         return false;
     }
-    catch (const std::runtime_error& e)
+    catch (const std::runtime_error& error)
     {
-        std::cerr << "WAL file has been poisoned: " << e.what() << std::endl;
+        std::cerr << "WAL file has been poisoned: " << error.what() << std::endl;
         return false;
     }
 
     for (const auto& [key, seq, type, value] : ops)
-    {
-        table_[Key{key, seq}] = Entry{type, seq, value};
-        currentSizeBytes_ += value.size();
-        currentSizeBytes_ += key.size();
-        currentSizeBytes_ += sizeof(Type);
-        currentSizeBytes_ += sizeof(seq);
-    }
+        applyToMemory(key, Entry{type, seq, value});
     return true;
+}
+
+void MemTable::applyToMemory(const std::string& key, const Entry& entry)
+{
+    Key mapKey{key, entry.seq};
+    if (const auto existing = table_.find(mapKey); existing != table_.end())
+        currentSizeBytes_ -= entrySize(key, existing->second);
+
+    currentSizeBytes_ += entrySize(key, entry);
+    table_.insert_or_assign(std::move(mapKey), entry);
+    currentSeq_ = std::max(entry.seq, currentSeq_);
 }
 
 size_t MemTable::size() const { return table_.size(); }
@@ -198,7 +228,10 @@ uint64_t MemTable::getMaxWALSeq() const { return currentSeq_; }
 
 MemTable::WALFileWriter::WALFileWriter(const std::string_view logPath) : path_(logPath)
 {
-    if (const auto parentPath = path_.parent_path(); !parentPath.empty())
+    std::filesystem::path parentPath = path_.parent_path();
+    if (parentPath.empty())
+        parentPath = ".";
+    else
     {
         std::error_code error;
         std::filesystem::create_directories(parentPath, error);
@@ -214,17 +247,40 @@ MemTable::WALFileWriter::WALFileWriter(const std::string_view logPath) : path_(l
         if (errno != EEXIST)
             throw std::system_error(errno, std::system_category(), "open failed");
         fileDescriptor_ = ::open(path_.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0664);
+        if (fileDescriptor_ < 0)
+            throw std::system_error(errno, std::system_category(), "open existing WAL failed");
     }
     else
     {
-        writeAll(fileDescriptor_, MAGIC.data(), MAGIC.size());
-        writeAll(fileDescriptor_, &VERSION, sizeof(VERSION));
-        if (fault::fsync(fileDescriptor_))
-            throw std::system_error(errno, std::system_category(), "fsync WAL head failed");
+        try
+        {
+            writeAll(fileDescriptor_, kWalMagic.data(), kWalMagic.size());
+            writeAll(fileDescriptor_, &kWalVersion, sizeof(kWalVersion));
+            if (fault::fsync(fileDescriptor_))
+                throw std::system_error(errno, std::system_category(), "fsync WAL head failed");
+
+            const int directoryDescriptor = ::open(parentPath.c_str(), O_RDONLY);
+            if (directoryDescriptor < 0)
+                throw std::system_error(errno, std::system_category(), "open WAL directory failed");
+
+            FdGuard directory(directoryDescriptor);
+            if (fault::fsync(directory.get()))
+                throw std::system_error(errno, std::system_category(), "fsync WAL directory failed");
+        }
+        catch (...)
+        {
+            ::close(fileDescriptor_);
+            fileDescriptor_ = -1;
+            throw;
+        }
     }
 }
 
-MemTable::WALFileWriter::~WALFileWriter() { ::close(fileDescriptor_); }
+MemTable::WALFileWriter::~WALFileWriter()
+{
+    if (fileDescriptor_ >= 0)
+        ::close(fileDescriptor_);
+}
 
 void MemTable::WALFileWriter::write(const std::string& record)
 {
@@ -263,21 +319,18 @@ bool MemTable::restoreFromWAL()
     std::stringstream contentBuffer;
     contentBuffer << input.rdbuf();
     const std::string content = contentBuffer.str();
-    if (content.size() < 5)
+    if (content.size() < kWalHeaderSize)
         throw std::runtime_error("Invalid WAL file format");
 
-    if (content.compare(0, kMagicSize, MAGIC))
+    if (content.compare(0, kWalMagic.size(), kWalMagic))
         throw std::runtime_error("Invalid WAL file format");
 
-    if (const auto version = static_cast<uint8_t>(content[kMagicSize]); version != VERSION)
+    if (const auto version = static_cast<uint8_t>(content[kWalMagic.size()]); version != kWalVersion)
         throw std::runtime_error("Invalid WAL file format");
 
-    size_t lastGoodOffset = kMagicSize + 1;
+    size_t lastGoodOffset = kWalHeaderSize;
     for (const auto& [key, entry] : parseWALRecords(content, lastGoodOffset))
-    {
-        table_.emplace(Key{key, entry.seq}, entry);
-        currentSeq_ = std::max(entry.seq, currentSeq_);
-    }
+        applyToMemory(key, entry);
 
     if (lastGoodOffset == content.size())
         return true;
@@ -293,7 +346,7 @@ bool MemTable::restoreFromWAL()
 std::vector<std::pair<std::string, Entry>> MemTable::parseWALRecords(const std::string_view content,
                                                                      size_t& lastGoodOffset)
 {
-    return WALParser(content).parse(lastGoodOffset);
+    return WALParser(content, kWalHeaderSize).parse(lastGoodOffset);
 }
 
 MemTableIterator::MemTableIterator(const MemTable& memTable)

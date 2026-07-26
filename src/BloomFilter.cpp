@@ -2,15 +2,27 @@
 
 #include <cmath>
 #include <cstring>
-#include <functional>
 #include <stdexcept>
 
 namespace
 {
 constexpr size_t kBitsPerWord = 64;
 constexpr size_t kSerializedHeaderSize = 2 * sizeof(uint64_t);
+constexpr uint64_t kFnvOffsetBasis = 0xcbf29ce484222325;
+constexpr uint64_t kFnvPrime = 0x100000001b3;
 
 size_t wordCountFor(const uint64_t bitCount) { return (bitCount + kBitsPerWord - 1) / kBitsPerWord; }
+
+uint64_t getFNV1a(std::string_view key)
+{
+    uint64_t hash = kFnvOffsetBasis;
+    for (const char character : key)
+    {
+        hash ^= static_cast<unsigned char>(character);
+        hash *= kFnvPrime;
+    }
+    return hash;
+}
 } // namespace
 
 std::vector<std::byte> BloomFilter::Serialize(const BloomFilter& bloomFilter)
@@ -91,9 +103,9 @@ bool BloomFilter::mightContain(const std::string_view key) const
 
 uint64_t BloomFilter::getBitPosition(std::string_view key, uint64_t hashIndex) const
 {
-    const size_t hash = std::hash<std::string_view>{}(key);
-    const uint32_t firstHash = hash >> 32;
-    uint32_t secondHash = hash & 0xFFFFFFFF;
+    const auto hashValue = getFNV1a(key);
+    const uint32_t firstHash = hashValue >> 32;
+    uint32_t secondHash = hashValue & 0xFFFFFFFF;
     if (secondHash == 0)
         secondHash = 1;
 

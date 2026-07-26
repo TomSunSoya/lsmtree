@@ -164,6 +164,17 @@ void overwriteSSTableIndexSize(const std::filesystem::path& path, const uint64_t
     ASSERT_TRUE(file.write(reinterpret_cast<const char*>(&indexSize), sizeof(indexSize)));
     ASSERT_TRUE(file.good());
 }
+
+void overwriteFirstRecordKeySize(const std::filesystem::path& path, const uint32_t keySize)
+{
+    std::fstream file(path, std::ios::binary | std::ios::in | std::ios::out);
+    ASSERT_TRUE(file.is_open());
+
+    constexpr std::streamoff keySizeOffset = sizeof(uint8_t) + sizeof(uint64_t);
+    file.seekp(keySizeOffset, std::ios::beg);
+    ASSERT_TRUE(file.write(reinterpret_cast<const char*>(&keySize), sizeof(keySize)));
+    ASSERT_TRUE(file.good());
+}
 } // namespace
 
 TEST(DBTest, ConstructorCreatesDataDirectoryAndWalFile)
@@ -187,6 +198,45 @@ TEST(DBTest, ConstructorRejectsExistingNonDirectoryPath)
     ASSERT_NO_FATAL_FAILURE(writeFile(root, "not a directory"));
 
     EXPECT_THROW(DB db(root, kManualFlushThreshold), std::invalid_argument);
+}
+
+TEST(DBTest, UnreadableManifestAbortsOpenWithoutDeletingTrackedSSTables)
+{
+    const std::filesystem::path root("db_tests_unreadable_manifest");
+    const ScopedPathCleanup cleanup(root);
+    const std::filesystem::path manifestPath = root / "MANIFEST";
+    const std::filesystem::path tablePath = root / "sstable" / "sst_0.sst";
+
+    {
+        DB db(root, 1, std::numeric_limits<uint64_t>::max());
+        ASSERT_NO_FATAL_FAILURE(expectPut(db, "alpha", "one"));
+    }
+    ASSERT_TRUE(std::filesystem::is_regular_file(manifestPath));
+    ASSERT_TRUE(std::filesystem::is_regular_file(tablePath));
+
+    const auto originalPermissions = std::filesystem::status(manifestPath).permissions();
+    std::error_code permissionError;
+    std::filesystem::permissions(manifestPath, std::filesystem::perms::none, std::filesystem::perm_options::replace,
+                                 permissionError);
+    ASSERT_FALSE(permissionError) << permissionError.message();
+
+    std::ifstream permissionProbe(manifestPath, std::ios::binary);
+    if (permissionProbe.is_open())
+    {
+        permissionProbe.close();
+        std::filesystem::permissions(manifestPath, originalPermissions, std::filesystem::perm_options::replace,
+                                     permissionError);
+        GTEST_SKIP() << "The current user can read a mode-000 file, so this failure mode cannot be exercised";
+    }
+
+    EXPECT_THROW(DB reopened(root, kManualFlushThreshold), std::exception);
+    EXPECT_TRUE(std::filesystem::is_regular_file(tablePath))
+        << "startup must not delete data files when the manifest cannot be read";
+
+    permissionError.clear();
+    std::filesystem::permissions(manifestPath, originalPermissions, std::filesystem::perm_options::replace,
+                                 permissionError);
+    EXPECT_FALSE(permissionError) << permissionError.message();
 }
 
 TEST(DBTest, PutAndGetUseActiveMemTable)
@@ -1080,6 +1130,22 @@ TEST(DBTest, RaiiSnapshotRegistersUntilEndOfScope)
     EXPECT_EQ(0, db.activeSnapshotCount());
 }
 
+TEST(DBTest, SnapshotMayBeDestroyedAfterOwningDatabase)
+{
+    const std::filesystem::path root("db_tests_snapshot_outlives_db");
+    const ScopedPathCleanup cleanup(root);
+    std::optional<Snapshot> snapshot;
+
+    {
+        auto db = std::make_unique<DB>(root, kManualFlushThreshold);
+        snapshot.emplace(db->snapshot());
+    }
+
+    // This is a sanitizer regression test: destroying the handle after its DB
+    // must not access the DB's released snapshot registry.
+    snapshot.reset();
+}
+
 TEST(DBTest, MoveConstructedSnapshotDoesNotDoubleRelease)
 {
     const std::filesystem::path root("db_tests_move_constructed_snapshot_no_double_release");
@@ -1145,6 +1211,32 @@ TEST(DBTest, CompactPersistsMergedTableAcrossReopen)
         ASSERT_NO_FATAL_FAILURE(expectGet(db, "beta", "two"));
         EXPECT_TRUE(std::filesystem::is_regular_file(compactedOutput));
     }
+}
+
+TEST(DBTest, CompactionRejectsCorruptInputWithoutDeletingSourceTables)
+{
+    const std::filesystem::path root("db_tests_compaction_rejects_corrupt_input");
+    const ScopedPathCleanup cleanup(root);
+    const std::filesystem::path firstInput = root / "sstable" / "sst_0.sst";
+    const std::filesystem::path secondInput = root / "sstable" / "sst_2.sst";
+
+    DB db(root, kManualFlushThreshold);
+    ASSERT_NO_FATAL_FAILURE(expectPut(db, "alpha", "one"));
+    ASSERT_NO_THROW(db.flush());
+    ASSERT_NO_FATAL_FAILURE(expectPut(db, "beta", "two"));
+    ASSERT_NO_THROW(db.flush());
+    ASSERT_TRUE(std::filesystem::is_regular_file(firstInput));
+    ASSERT_TRUE(std::filesystem::is_regular_file(secondInput));
+
+    ASSERT_NO_FATAL_FAILURE(overwriteFirstRecordKeySize(firstInput, 1024));
+
+    EXPECT_THROW(db.compact(), std::exception);
+    EXPECT_TRUE(std::filesystem::is_regular_file(firstInput));
+    EXPECT_TRUE(std::filesystem::is_regular_file(secondInput));
+
+    const Manifest manifest(root / "MANIFEST");
+    EXPECT_EQ(2, manifest.level(0).size())
+        << "a failed compaction must not publish a partial output or retire either input table";
 }
 
 TEST(DBTest, CompactPersistsMergedTableMetadataInManifest)

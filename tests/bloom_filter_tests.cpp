@@ -1,6 +1,7 @@
 #include "BloomFilter.h"
 
 #include <cstddef>
+#include <cstring>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -97,6 +98,25 @@ TEST(BloomFilterTest, SerializationRoundTripPreservesMembership)
         EXPECT_EQ(original.mightContain(key), restored.mightContain(key))
             << "membership decision changed after restoring key: " << key;
     }
+}
+
+TEST(BloomFilterTest, PersistedHashMatchesDocumentedFNV1aVector)
+{
+    // Persisted Bloom bits are part of the SSTable format. Pin the base hash to
+    // 64-bit FNV-1a so a different standard library, compiler, or process cannot
+    // reinterpret an existing table and introduce a false negative.
+    BloomFilter filter(uint64_t{64}, uint64_t{1});
+    filter.add("alpha");
+
+    const auto bytes = BloomFilter::Serialize(filter);
+    ASSERT_EQ(3 * sizeof(uint64_t), bytes.size());
+
+    uint64_t word = 0;
+    std::memcpy(&word, bytes.data() + 2 * sizeof(uint64_t), sizeof(word));
+
+    // FNV-1a("alpha") == 0x8ac625bb85ed202b. The current double-hash
+    // scheme uses the upper 32 bits for hash index zero: 0x8ac625bb % 64 == 59.
+    EXPECT_EQ(uint64_t{1} << 59, word);
 }
 
 TEST(BloomFilterTest, FromBytesRejectsInvalidEnvelopeSizes)
