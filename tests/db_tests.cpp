@@ -19,19 +19,13 @@
 namespace
 {
 using test_support::expectFileContent;
+using test_support::kWalHeader;
 using test_support::readFile;
 using test_support::ScopedPathCleanup;
+using test_support::walContent;
 using test_support::writeFile;
 
 constexpr uint64_t kManualFlushThreshold = std::numeric_limits<uint64_t>::max();
-constexpr std::string_view kWalHeader{"LWAL\x01", 5};
-
-std::string walContent(const std::string_view records = {})
-{
-    std::string content(kWalHeader);
-    content += records;
-    return content;
-}
 
 void expectPut(DB& db, const std::string& key, const std::string& value)
 {
@@ -380,7 +374,7 @@ TEST(DBTest, WriteBatchRetainsRecordsAcrossWritesUntilCleared)
         ASSERT_TRUE(db.write(batch));
     }
 
-    ASSERT_NO_FATAL_FAILURE(expectFileContent(walPath, walContent("1,P,1,3,key=5,value\n1,P,2,3,key=5,value\n")));
+    ASSERT_NO_FATAL_FAILURE(expectFileContent(walPath, walContent({"1,P,1,3,key=5,value\n", "1,P,2,3,key=5,value\n"})));
 }
 
 TEST(DBTest, WriteBatchReopensFromWalAndContinuesSequence)
@@ -408,7 +402,7 @@ TEST(DBTest, WriteBatchReopensFromWalAndContinuesSequence)
     }
 
     ASSERT_NO_FATAL_FAILURE(
-        expectFileContent(walPath, walContent("2,P,1,5,alpha=3,one\nD,2,5,ghost=0,\n1,P,3,5,gamma=5,three\n")));
+        expectFileContent(walPath, walContent({"2,P,1,5,alpha=3,one\nD,2,5,ghost=0,\n", "1,P,3,5,gamma=5,three\n"})));
 }
 
 TEST(DBTest, ReopensFromWal)
@@ -432,8 +426,9 @@ TEST(DBTest, ReopensFromWal)
         ASSERT_NO_FATAL_FAILURE(expectPut(db, "gamma", "three"));
     }
 
-    ASSERT_NO_FATAL_FAILURE(expectFileContent(
-        root / "wal" / "wal_0.wal", walContent("1,P,1,5,alpha=3,one\n1,P,2,4,beta=3,two\n1,P,3,5,gamma=5,three\n")));
+    ASSERT_NO_FATAL_FAILURE(
+        expectFileContent(root / "wal" / "wal_0.wal",
+                          walContent({"1,P,1,5,alpha=3,one\n", "1,P,2,4,beta=3,two\n", "1,P,3,5,gamma=5,three\n"})));
 }
 
 TEST(DBTest, ReopensFromWalWithDeletedKeyHidden)
@@ -489,7 +484,7 @@ TEST(DBTest, WritesToExpectedWalPath)
         ASSERT_NO_FATAL_FAILURE(expectPut(db, "beta", "two"));
     }
 
-    ASSERT_NO_FATAL_FAILURE(expectFileContent(walPath, walContent("1,P,1,5,alpha=3,one\n1,P,2,4,beta=3,two\n")));
+    ASSERT_NO_FATAL_FAILURE(expectFileContent(walPath, walContent({"1,P,1,5,alpha=3,one\n", "1,P,2,4,beta=3,two\n"})));
 }
 
 TEST(DBTest, FlushedTombstoneHidesOlderSSTableValueButKeepsOtherKeys)
@@ -1506,7 +1501,7 @@ TEST(DBTest, CompactSplitsOutputIntoNonOverlappingLevelOneTablesAndSurvivesReope
 {
     const std::filesystem::path root("db_tests_compact_splits_l1_output");
     const ScopedPathCleanup cleanup(root);
-    constexpr uint64_t sliceThreshold = 20;
+    const uint64_t sliceThreshold = encodedRecordSize(Record{"a", 0, Type::VALUE, "1"}) + 1;
 
     const std::vector<std::pair<std::string, std::string>> expected{
         {"a", "1"}, {"b", "2"}, {"c", "3"}, {"d", "4"}, {"e", "5"},

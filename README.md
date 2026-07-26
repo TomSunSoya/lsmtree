@@ -19,17 +19,19 @@ crash recovery.
 - **LSM-tree storage engine** — MemTable (`std::map` ordered by key + sequence),
   WAL-backed writes, flush to immutable SSTables
 - **Write-ahead log** — every mutation is appended to the WAL before applying;
-  on reopen the engine replays it and tolerates a torn tail write
+  checksummed batch frames distinguish committed corruption from an incomplete,
+  zero-filled, or stale tail
 - **SSTable format** — records in 4 KiB blocks, in-memory sparse index,
-  per-table bloom filter to skip negative lookups
-- **Tombstone deletion** — deletes are records too; they disappear during compaction
+  per-table bloom filter, and a CRC32 on every record
+- **Tombstone deletion** — deletes are durable records and remain conservative
+  across compaction
 - **Leveled compaction** — L0 triggers on table count, deeper levels on geometrically
-  growing size budgets; runs in bounded incremental slices
+  growing size budgets; output is split into bounded table slices
 - **Snapshots** — MVCC-style consistent reads at a pinned sequence number
 - **Range scans** — merged iteration over MemTable and all levels
 - **Atomic batch writes** — `WriteBatch` applies a group of puts/deletes under one sequence
-- **Crash safety** — atomic file publication (write to temp + rename), orphaned temp
-  cleanup on startup, MANIFEST for durable metadata
+- **Crash safety** — checksummed WAL/SSTable data, atomic file publication (write to
+  temp + rename), orphaned temp cleanup on startup, MANIFEST for durable metadata
 - **Fault-injection harness** — a test seam that intercepts `write`/`fsync` to verify
   crash-recovery behavior under I/O failures
 
@@ -54,7 +56,7 @@ On-disk layout of a database directory:
 data/
 ├── MANIFEST            # levels, table metadata, log number, last sequence
 ├── wal_000001.wal      # active write-ahead log
-├── sst_000002.sst      # [records][bloom filter][sparse index][footer]
+├── sst_000002.sst      # [checksummed records][bloom filter][sparse index][footer]
 └── ...
 ```
 
@@ -138,9 +140,21 @@ tests/   GoogleTest suites, including crash/fault-injection tests
 cmake/   CMake helpers (clang-format integration)
 ```
 
-## Notes
+## Limitations
 
-- Single-threaded; concurrency is intentionally out of scope for now.
+- Reads, writes, flushes, and compaction are single-threaded; there is no
+  background compaction.
+- Range scans and compaction materialize their merged input in memory. Output
+  tables are size-bounded, but peak memory still grows with the input set.
+- Tombstones are retained indefinitely because the engine does not yet prove
+  that a compaction is writing the bottommost level.
+- SSTable metadata is cached, but point reads still perform a file existence
+  check and open the table. File-descriptor caching would require an eviction
+  policy.
+- MANIFEST is atomically rewritten in full after metadata changes rather than
+  maintained as an incremental edit log.
+- WAL v2, checksummed SSTables, and MANIFEST v4 are the current on-disk formats;
+  older database directories are rejected rather than migrated in place.
 - Test-only fault injection lives in `inc/FaultInjection.h` — engine code calls
   `fault::write`/`fault::fsync`, which cost one null check when disarmed.
 

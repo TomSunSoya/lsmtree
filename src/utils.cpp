@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <fcntl.h>
 #include <format>
+#include <limits>
 #include <queue>
 #include <stdexcept>
 #include <system_error>
@@ -15,6 +16,9 @@
 
 namespace
 {
+constexpr uint32_t kCrc32InitialValue = 0xFFFFFFFFU;
+constexpr uint32_t kCrc32Polynomial = 0xEDB88320U;
+
 struct MergeItem
 {
     std::string key;
@@ -69,6 +73,42 @@ std::filesystem::path walPath(const std::filesystem::path& dataDirectory, const 
 std::filesystem::path sstablePath(const std::filesystem::path& dataDirectory, const uint64_t fileNumber)
 {
     return dataDirectory / "sstable" / std::format("{}{}{}", kSSTablePrefix, fileNumber, kSSTableSuffix);
+}
+
+uint32_t crc32(const std::string_view data)
+{
+    uint32_t checksum = kCrc32InitialValue;
+    for (const unsigned char byte : data)
+    {
+        checksum ^= byte;
+        for (unsigned int bit = 0; bit < 8; ++bit)
+            checksum = (checksum >> 1U) ^ (kCrc32Polynomial & (0U - (checksum & 1U)));
+    }
+    return checksum ^ kCrc32InitialValue;
+}
+
+std::string encodeSSTableRecord(const Record& record)
+{
+    if (record.key.size() > std::numeric_limits<uint32_t>::max() ||
+        record.value.size() > std::numeric_limits<uint32_t>::max())
+        throw std::length_error("SSTable record field is too large");
+
+    const auto appendValue = [](std::string& output, const auto& value)
+    { output.append(reinterpret_cast<const char*>(&value), sizeof(value)); };
+
+    const auto type = static_cast<uint8_t>(record.type);
+    const uint32_t keySize = record.key.size();
+    const uint32_t valueSize = record.value.size();
+
+    std::string encoded;
+    encoded.reserve(kEncodedRecordHeaderSize + keySize + valueSize);
+    appendValue(encoded, type);
+    appendValue(encoded, record.seq);
+    appendValue(encoded, keySize);
+    appendValue(encoded, valueSize);
+    encoded.append(record.key);
+    encoded.append(record.value);
+    return encoded;
 }
 
 void removeFile(const std::filesystem::path& path, const char* message)
@@ -155,17 +195,10 @@ FileWriter::FileWriter(std::filesystem::path path) : path_(std::move(path)), dat
 
 uint64_t FileWriter::add(const Record& record)
 {
-    const uint32_t keySize = record.key.size();
-    const uint32_t valueSize = record.value.size();
-    const uint64_t seq = record.seq;
-    const auto type = static_cast<uint8_t>(record.type);
-
-    writeAll(dataFile_.get(), &type, sizeof(type));
-    writeAll(dataFile_.get(), &seq, sizeof(seq));
-    writeAll(dataFile_.get(), &keySize, sizeof(keySize));
-    writeAll(dataFile_.get(), &valueSize, sizeof(valueSize));
-    writeAll(dataFile_.get(), record.key.data(), keySize);
-    writeAll(dataFile_.get(), record.value.data(), valueSize);
+    const std::string encoded = encodeSSTableRecord(record);
+    const uint32_t checksum = crc32(encoded);
+    writeAll(dataFile_.get(), encoded.data(), encoded.size());
+    writeAll(dataFile_.get(), &checksum, sizeof(checksum));
     return encodedRecordSize(record);
 }
 

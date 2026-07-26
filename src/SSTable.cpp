@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cassert>
+#include <cstring>
 #include <iterator>
 #include <stdexcept>
 #include <utility>
@@ -59,28 +60,33 @@ void validateFooter(const Footer& footer, const uint64_t fileSize)
 
 Record readRecord(std::ifstream& input, const uint64_t availableBytes)
 {
-    if (availableBytes < kEncodedRecordHeaderSize)
+    if (availableBytes < kEncodedRecordHeaderSize + kEncodedRecordChecksumSize)
         throw std::runtime_error("Corrupt SSTable record header");
 
+    std::array<char, kEncodedRecordHeaderSize> header{};
+    if (!input.read(header.data(), header.size()))
+        throw std::runtime_error("Corrupt SSTable record header");
+
+    size_t headerOffset = 0;
+    const auto readHeaderValue = [&header, &headerOffset](auto& value)
+    {
+        std::memcpy(&value, header.data() + headerOffset, sizeof(value));
+        headerOffset += sizeof(value);
+    };
+
     uint8_t type = 0;
-    if (!input.read(reinterpret_cast<char*>(&type), sizeof(type)))
-        throw std::runtime_error("Corrupt SSTable record type");
-
     uint64_t sequence = 0;
-    if (!input.read(reinterpret_cast<char*>(&sequence), sizeof(sequence)))
-        throw std::runtime_error("Corrupt SSTable record sequence");
-
     uint32_t keySize = 0;
     uint32_t valueSize = 0;
-    if (!input.read(reinterpret_cast<char*>(&keySize), sizeof(keySize)))
-        throw std::runtime_error("Corrupt SSTable key size");
-    if (!input.read(reinterpret_cast<char*>(&valueSize), sizeof(valueSize)))
-        throw std::runtime_error("Corrupt SSTable value size");
+    readHeaderValue(type);
+    readHeaderValue(sequence);
+    readHeaderValue(keySize);
+    readHeaderValue(valueSize);
 
     if (type > static_cast<uint8_t>(Type::TOMBSTONE))
         throw std::runtime_error("Corrupt SSTable record type");
 
-    const uint64_t payloadBytes = availableBytes - kEncodedRecordHeaderSize;
+    const uint64_t payloadBytes = availableBytes - kEncodedRecordHeaderSize - kEncodedRecordChecksumSize;
     if (keySize > payloadBytes || valueSize > payloadBytes - keySize)
         throw std::runtime_error("Corrupt SSTable record length");
 
@@ -90,6 +96,16 @@ Record readRecord(std::ifstream& input, const uint64_t availableBytes)
         throw std::runtime_error("Corrupt SSTable record key");
     if (!input.read(value.data(), valueSize))
         throw std::runtime_error("Corrupt SSTable record value");
+
+    uint32_t storedChecksum = 0;
+    if (!input.read(reinterpret_cast<char*>(&storedChecksum), sizeof(storedChecksum)))
+        throw std::runtime_error("Corrupt SSTable record checksum");
+
+    std::string encoded(header.data(), header.size());
+    encoded.append(key);
+    encoded.append(value);
+    if (crc32(encoded) != storedChecksum)
+        throw std::runtime_error("Corrupt SSTable record checksum");
 
     return Record{std::move(key), sequence, static_cast<Type>(type), std::move(value)};
 }
@@ -286,7 +302,7 @@ uint64_t SSTable::addRecordToFile(const std::span<Record> records, const std::fi
 
     uint64_t fileSize = 0;
 
-    BloomFilter bloomFilter(records.size(), kBloomFalsePositiveProbability);
+    BloomFilter bloomFilter = BloomFilter::forEntries(records.size(), kBloomFalsePositiveProbability);
     FileWriter writer(path);
 
     std::vector<Index> indices;

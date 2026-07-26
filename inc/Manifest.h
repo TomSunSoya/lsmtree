@@ -38,5 +38,6 @@ class Manifest
     uint64_t logNumber_{};
     uint64_t lastSeq_{};
 
-    static constexpr uint8_t kManifestFormatVersion = 3;
+    // Version 4 gates WAL v2 and checksummed SSTables as one database format.
+    static constexpr uint8_t kManifestFormatVersion = 4;
 };

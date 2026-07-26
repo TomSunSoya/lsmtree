@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <initializer_list>
@@ -12,8 +13,46 @@
 
 #include <gtest/gtest.h>
 
+#include "utils.h"
+
 namespace test_support
 {
+inline constexpr std::string_view kWalHeader{"LWAL\x02", 5};
+inline constexpr std::string_view kWalFrameMagic{"WFRM", 4};
+inline constexpr std::string_view kWalCommitMagic{"WCMT", 4};
+
+template <typename Value> void appendValue(std::string& output, const Value& value)
+{
+    output.append(reinterpret_cast<const char*>(&value), sizeof(value));
+}
+
+inline std::string walFrame(const std::string_view payload)
+{
+    std::string frame(kWalFrameMagic);
+    appendValue(frame, static_cast<uint64_t>(payload.size()));
+    frame.append(payload);
+    appendValue(frame, crc32(payload));
+    frame.append(kWalCommitMagic);
+    return frame;
+}
+
+inline std::string walContent() { return std::string(kWalHeader); }
+
+inline std::string walContent(const std::string_view payload)
+{
+    std::string content(kWalHeader);
+    content += walFrame(payload);
+    return content;
+}
+
+inline std::string walContent(const std::initializer_list<std::string_view> payloads)
+{
+    std::string content(kWalHeader);
+    for (const std::string_view payload : payloads)
+        content += walFrame(payload);
+    return content;
+}
+
 class ScopedPathCleanup
 {
   public:

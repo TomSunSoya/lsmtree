@@ -19,7 +19,7 @@ std::string indexedKey(const std::string_view prefix, const size_t index)
 
 TEST(BloomFilterTest, EmptyFilterRejectsKeys)
 {
-    const BloomFilter filter(100, 0.01);
+    const BloomFilter filter = BloomFilter::forEntries(100, 0.01);
 
     EXPECT_FALSE(filter.mightContain(""));
     EXPECT_FALSE(filter.mightContain("alpha"));
@@ -28,7 +28,7 @@ TEST(BloomFilterTest, EmptyFilterRejectsKeys)
 
 TEST(BloomFilterTest, AddedKeysNeverBecomeFalseNegatives)
 {
-    BloomFilter filter(10, 0.01);
+    BloomFilter filter = BloomFilter::forEntries(10, 0.01);
     const std::vector<std::string> keys{
         "",
         "alpha",
@@ -49,7 +49,7 @@ TEST(BloomFilterTest, FalsePositiveRateStaysNearConfiguredProbability)
     constexpr size_t queryCount = 20'000;
     constexpr double configuredProbability = 0.01;
     constexpr double maximumAcceptedRate = 0.03;
-    BloomFilter filter(expectedEntries, configuredProbability);
+    BloomFilter filter = BloomFilter::forEntries(expectedEntries, configuredProbability);
 
     for (size_t i = 0; i < expectedEntries; ++i)
         filter.add(indexedKey("inserted-", i));
@@ -72,7 +72,7 @@ TEST(BloomFilterTest, FalsePositiveRateStaysNearConfiguredProbability)
 TEST(BloomFilterTest, SerializationRoundTripPreservesMembership)
 {
     constexpr size_t expectedEntries = 1'000;
-    BloomFilter original(expectedEntries, 0.01);
+    BloomFilter original = BloomFilter::forEntries(expectedEntries, 0.01);
     std::vector<std::string> insertedKeys;
     insertedKeys.reserve(expectedEntries);
 
@@ -105,7 +105,7 @@ TEST(BloomFilterTest, PersistedHashMatchesDocumentedFNV1aVector)
     // Persisted Bloom bits are part of the SSTable format. Pin the base hash to
     // 64-bit FNV-1a so a different standard library, compiler, or process cannot
     // reinterpret an existing table and introduce a false negative.
-    BloomFilter filter(uint64_t{64}, uint64_t{1});
+    BloomFilter filter = BloomFilter::fromParameters(64, 1);
     filter.add("alpha");
 
     const auto bytes = BloomFilter::Serialize(filter);

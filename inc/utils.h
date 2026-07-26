@@ -39,10 +39,11 @@ struct Record
 
 // type(1) + sequence(8) + key size(4) + value size(4)
 constexpr uint64_t kEncodedRecordHeaderSize = sizeof(uint8_t) + sizeof(uint64_t) + 2 * sizeof(uint32_t);
+constexpr uint64_t kEncodedRecordChecksumSize = sizeof(uint32_t);
 
 [[nodiscard]] inline uint64_t encodedRecordSize(const Record& record)
 {
-    return kEncodedRecordHeaderSize + record.key.size() + record.value.size();
+    return kEncodedRecordHeaderSize + record.key.size() + record.value.size() + kEncodedRecordChecksumSize;
 }
 
 struct Index
@@ -83,6 +84,8 @@ constexpr std::string_view kSSTableSuffix = ".sst";
 
 [[nodiscard]] std::filesystem::path walPath(const std::filesystem::path& dataDirectory, uint64_t fileNumber);
 [[nodiscard]] std::filesystem::path sstablePath(const std::filesystem::path& dataDirectory, uint64_t fileNumber);
+[[nodiscard]] uint32_t crc32(std::string_view data);
+[[nodiscard]] std::string encodeSSTableRecord(const Record& record);
 void removeFile(const std::filesystem::path& path, const char* message);
 void writeAll(int fd, const void* data, std::size_t size);
 

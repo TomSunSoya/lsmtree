@@ -14,13 +14,10 @@
 
 using test_support::expectFileContent;
 using test_support::ScopedPathCleanup;
+using test_support::walContent;
 
 namespace
 {
-constexpr std::string_view kWalHeader{"LWAL\x01", 5};
-
-std::string walContent(const std::string_view records) { return std::string(kWalHeader) + std::string(records); }
-
 // Counts how many syscalls of each kind the engine issued. Useful when you need
 // to know which fsync is "the nth" before arming failNth.
 struct CallCounter

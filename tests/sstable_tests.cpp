@@ -165,6 +165,96 @@ TEST(SSTableTest, GetReportsCorruptRecordLengthInsteadOfMissingKey)
         std::exception);
 }
 
+TEST(SSTableTest, GetRejectsCorruptKeyBytes)
+{
+    const std::filesystem::path walPath("sstable_tests_corrupt_key.wal");
+    const std::filesystem::path sstablePath("sstable_tests_corrupt_key.sst");
+    const ScopedPathCleanup cleanup({walPath, sstablePath});
+
+    {
+        MemTable memTable(walPath.string());
+        ASSERT_NO_FATAL_FAILURE(expectPut(memTable, "alpha", "one", 1));
+        ASSERT_NO_THROW(SSTable::build(memTable, sstablePath));
+    }
+
+    {
+        std::fstream file(sstablePath, std::ios::binary | std::ios::in | std::ios::out);
+        ASSERT_TRUE(file.is_open());
+        file.seekp(kEncodedRecordHeaderSize, std::ios::beg);
+        const char damaged = 'A';
+        ASSERT_TRUE(file.write(&damaged, sizeof(damaged)));
+    }
+
+    const SSTable table(sstablePath);
+    std::string value;
+    EXPECT_THROW(static_cast<void>(table.get("alpha", kReadLatest, value)), std::runtime_error);
+}
+
+TEST(SSTableTest, GetRejectsCorruptValueBytes)
+{
+    const std::filesystem::path walPath("sstable_tests_corrupt_value.wal");
+    const std::filesystem::path sstablePath("sstable_tests_corrupt_value.sst");
+    const ScopedPathCleanup cleanup({walPath, sstablePath});
+
+    {
+        MemTable memTable(walPath.string());
+        ASSERT_NO_FATAL_FAILURE(expectPut(memTable, "alpha", "one", 1));
+        ASSERT_NO_THROW(SSTable::build(memTable, sstablePath));
+    }
+
+    {
+        std::fstream file(sstablePath, std::ios::binary | std::ios::in | std::ios::out);
+        ASSERT_TRUE(file.is_open());
+        file.seekp(kEncodedRecordHeaderSize + std::string_view("alpha").size(), std::ios::beg);
+        const char damaged = 'O';
+        ASSERT_TRUE(file.write(&damaged, sizeof(damaged)));
+    }
+
+    const SSTable table(sstablePath);
+    std::string value;
+    EXPECT_THROW(static_cast<void>(table.get("alpha", kReadLatest, value)), std::runtime_error);
+}
+
+TEST(SSTableTest, EverySingleByteRecordMutationIsDetected)
+{
+    const std::filesystem::path walPath("sstable_tests_record_mutation.wal");
+    const std::filesystem::path sstablePath("sstable_tests_record_mutation.sst");
+    const ScopedPathCleanup cleanup({walPath, sstablePath});
+
+    {
+        MemTable memTable(walPath.string());
+        ASSERT_NO_FATAL_FAILURE(expectPut(memTable, "alpha", "one", 1));
+        ASSERT_NO_FATAL_FAILURE(expectPut(memTable, "beta", "two", 2));
+        ASSERT_NO_THROW(SSTable::build(memTable, sstablePath));
+    }
+
+    std::string original;
+    ASSERT_NO_FATAL_FAILURE(readFile(sstablePath, original));
+    const uint64_t recordsSize = readFooterSizes(sstablePath)[0];
+    ASSERT_GT(recordsSize, 0);
+
+    for (size_t offset = 0; offset < recordsSize; ++offset)
+    {
+        std::string mutated = original;
+        mutated[offset] ^= static_cast<char>(0x80);
+        ASSERT_NO_FATAL_FAILURE(writeFile(sstablePath, mutated));
+
+        bool rejected = false;
+        try
+        {
+            const SSTable table(sstablePath);
+            std::string value;
+            static_cast<void>(table.get("alpha", kReadLatest, value));
+            static_cast<void>(table.get("beta", kReadLatest, value));
+        }
+        catch (const std::exception&)
+        {
+            rejected = true;
+        }
+        EXPECT_TRUE(rejected) << "record byte mutation was not detected at offset " << offset;
+    }
+}
+
 TEST(SSTableTest, BuildPersistsTombstoneAndKeepsScanningUnrelatedKeys)
 {
     const std::filesystem::path walPath("sstable_tests_tombstone.wal");
@@ -304,7 +394,7 @@ TEST(SSTableTest, BuildWritesExpectedLittleEndianRecordPrefix)
     const std::filesystem::path walPath("sstable_tests_exact_bytes.wal");
     const std::filesystem::path sstablePath("sstable_tests_exact_bytes.sst");
     const ScopedPathCleanup cleanup({walPath, sstablePath});
-    constexpr size_t expectedRecordsSize = 41;
+    constexpr size_t expectedRecordsSize = 49;
 
     {
         MemTable memTable(walPath.string());
@@ -318,8 +408,8 @@ TEST(SSTableTest, BuildWritesExpectedLittleEndianRecordPrefix)
     ASSERT_NO_FATAL_FAILURE(readFile(sstablePath, content));
 
     ASSERT_GE(content.size(), expectedRecordsSize);
-    EXPECT_EQ("00 08 07 06 05 04 03 02 01 01 00 00 00 02 00 00 00 61 78 79 "
-              "00 18 17 16 15 14 13 12 11 04 00 00 00 00 00 00 00 6c 6f 6e 67",
+    EXPECT_EQ("00 08 07 06 05 04 03 02 01 01 00 00 00 02 00 00 00 61 78 79 76 0a e8 e6 "
+              "00 18 17 16 15 14 13 12 11 04 00 00 00 00 00 00 00 6c 6f 6e 67 8b d0 d4 36",
               hexDump(std::string_view(content).substr(0, expectedRecordsSize)));
 }
 
@@ -564,7 +654,8 @@ TEST(SSTableTest, SparseIndexLocatesKeysAcrossMultipleBlocks)
     const std::filesystem::path sstablePath = root / "table.sst";
     constexpr size_t entryCount = 12;
     constexpr size_t valueSize = 1'500;
-    constexpr uint64_t recordSize = kEncodedRecordHeaderSize + 6 + valueSize;
+    const uint64_t recordSize =
+        encodedRecordSize(Record{multiBlockKey(0), 0, Type::VALUE, std::string(valueSize, 'a')});
     std::filesystem::create_directories(root);
 
     {
@@ -617,7 +708,7 @@ TEST(SSTableTest, SparseIndexLocatesKeysAcrossMultipleBlocks)
     expectMissing(sstable, "key-025");
     expectMissing(sstable, "key-z");
 
-    BloomFilter mirrorFilter(entryCount, 0.01);
+    BloomFilter mirrorFilter = BloomFilter::forEntries(entryCount, 0.01);
     for (size_t i = 0; i < entryCount; ++i)
         mirrorFilter.add(multiBlockKey(i));
 
@@ -764,7 +855,7 @@ TEST(SSTableTest, SparseIndexStopsAtDeclaredSizeBeforeFooter)
     ASSERT_TRUE(in.read(reinterpret_cast<char*>(&recordsSize), sizeof(recordsSize)));
     ASSERT_TRUE(in.read(reinterpret_cast<char*>(&bloomSize), sizeof(bloomSize)));
     ASSERT_TRUE(in.read(reinterpret_cast<char*>(&indexSize), sizeof(indexSize)));
-    EXPECT_EQ(kEncodedRecordHeaderSize + 3, recordsSize);
+    EXPECT_EQ(encodedRecordSize(Record{"zzz", 0, Type::VALUE, ""}), recordsSize);
     EXPECT_GT(bloomSize, 0);
     EXPECT_EQ(sizeof(uint32_t) + 3 + sizeof(uint64_t), indexSize);
 

@@ -60,6 +60,12 @@ void expectRecords(const std::vector<Record>& actual, const std::vector<Record>&
 }
 } // namespace
 
+TEST(Crc32Test, MatchesStandardCheckValue)
+{
+    EXPECT_EQ(0U, crc32(""));
+    EXPECT_EQ(0xCBF43926U, crc32("123456789"));
+}
+
 TEST(SnapshotIteratorTest, ConstructorPositionsAtNewestVisibleVersionAndAdvanceFindsTheNextOne)
 {
     SnapshotIterator iterator(source({

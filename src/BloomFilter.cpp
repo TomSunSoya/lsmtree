@@ -64,15 +64,20 @@ BloomFilter BloomFilter::fromBytes(const std::span<const std::byte> data)
     return bloomFilter;
 }
 
-BloomFilter::BloomFilter(unsigned int expectedEntries, double falsePositiveProbability)
+BloomFilter BloomFilter::forEntries(const std::size_t expectedEntries, const double falsePositiveProbability)
 {
     static const double naturalLogOfTwo = std::log(2.0);
     const double calculatedBitCount = -static_cast<double>(expectedEntries) * std::log(falsePositiveProbability) /
                                       (naturalLogOfTwo * naturalLogOfTwo);
 
-    bitCount_ = static_cast<uint64_t>(std::ceil(calculatedBitCount));
-    hashCount_ = static_cast<uint64_t>(std::round(calculatedBitCount / expectedEntries * naturalLogOfTwo));
-    words_.resize(wordCountFor(bitCount_));
+    const auto bitCount = static_cast<uint64_t>(std::ceil(calculatedBitCount));
+    const auto hashCount = static_cast<uint64_t>(std::round(calculatedBitCount / expectedEntries * naturalLogOfTwo));
+    return BloomFilter(bitCount, hashCount);
+}
+
+BloomFilter BloomFilter::fromParameters(const uint64_t bitCount, const uint64_t hashCount)
+{
+    return BloomFilter(bitCount, hashCount);
 }
 
 BloomFilter::BloomFilter(uint64_t bitCount, uint64_t hashCount) : bitCount_(bitCount), hashCount_(hashCount)

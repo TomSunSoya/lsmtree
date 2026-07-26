@@ -16,20 +16,27 @@
 
 ## 当前阶段
 
-功能主干和本轮持久化正确性加固已经完成，项目进入封版维护阶段。当前完整测试数为 177；普通构建和 ASan/UBSan 构建均已通过。
+功能主干和持久化正确性加固已经完成，项目进入封版维护阶段。当前完整测试数为 185。
 
 已经覆盖的关键边界包括：
 
 - Manifest 无法读取时中止启动，并避免提前清理受其追踪的 SSTable。
 - flush 发布失败后 DB 进入不可写状态。
 - WAL 批次只在写入并同步成功后进入 MemTable。
+- WAL v2 使用带长度、CRC32 和提交标记的批次帧：截断、补零和垃圾尾部可安全截断，
+  已提交帧的损坏则会拒绝恢复。
 - WAL replay 恢复 `currentSizeBytes_`，重复 `(key, sequence)` 与在线写入具有一致的覆盖语义。
 - 新 WAL 同步文件和父目录。
-- SSTable 对 Footer、记录、Bloom Filter 和稀疏索引边界进行校验。
+- SSTable 对 Footer、记录、Bloom Filter 和稀疏索引边界进行校验，并为每条记录
+  （包括类型、sequence、长度、key 和 value）保存 CRC32。
 - Bloom Filter 使用稳定的 FNV-1a 哈希。
 - Snapshot 的注册状态可安全晚于 DB 生命周期释放。
 
-尚未实现、也不在当前收尾范围内：并发读写、后台 compaction、乐观事务、压缩、record checksum、SQL 和网络服务。乐观事务保留到未来并发设计时一并考虑。
+当前磁盘格式为 WAL v2、带校验和的 SSTable 与 MANIFEST v4，不提供旧格式原地迁移。
+
+尚未实现、也不在当前收尾范围内：并发读写、后台 compaction、流式归并、最底层墓碑
+回收、文件描述符缓存与淘汰、MANIFEST 增量日志、乐观事务、压缩、SQL 和网络服务。
+乐观事务保留到未来并发设计时一并考虑。
 
 ## 协作方式
 

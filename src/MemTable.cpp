@@ -5,9 +5,11 @@
 #include <cassert>
 #include <cctype>
 #include <cerrno>
+#include <cstring>
 #include <fcntl.h>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <sstream>
 #include <stdexcept>
 #include <system_error>
@@ -16,8 +18,16 @@
 namespace
 {
 constexpr std::string_view kWalMagic{"LWAL", 4};
-constexpr uint8_t kWalVersion = 1;
+constexpr uint8_t kWalVersion = 2;
 constexpr size_t kWalHeaderSize = kWalMagic.size() + sizeof(kWalVersion);
+
+// WAL v2 repeats [frame magic][payload size][batch payload][CRC32][commit magic]
+// after the file header. The trailing marker distinguishes a committed corrupt
+// frame from bytes left by an incomplete append.
+constexpr std::string_view kWalFrameMagic{"WFRM", 4};
+constexpr std::string_view kWalCommitMagic{"WCMT", 4};
+constexpr size_t kWalFrameMetadataSize =
+    kWalFrameMagic.size() + sizeof(uint64_t) + sizeof(uint32_t) + kWalCommitMagic.size();
 
 size_t entrySize(const std::string_view key, const Entry& entry)
 {
@@ -36,6 +46,149 @@ std::string encodeWALRecord(const Record& record)
     return encodeWALRecord(record.key, record.seq, record.value, record.type);
 }
 
+template <typename Value> void appendValue(std::string& output, const Value& value)
+{
+    output.append(reinterpret_cast<const char*>(&value), sizeof(value));
+}
+
+template <typename Value> bool readValue(const std::string_view content, const size_t offset, Value& value)
+{
+    if (offset > content.size() || sizeof(value) > content.size() - offset)
+        return false;
+
+    std::memcpy(&value, content.data() + offset, sizeof(value));
+    return true;
+}
+
+std::string encodeWALFrame(const std::string_view payload)
+{
+    std::string frame;
+    frame.reserve(kWalFrameMetadataSize + payload.size());
+    frame.append(kWalFrameMagic);
+    appendValue(frame, static_cast<uint64_t>(payload.size()));
+    frame.append(payload);
+    appendValue(frame, crc32(payload));
+    frame.append(kWalCommitMagic);
+    return frame;
+}
+
+bool validFrameAt(const std::string_view content, const size_t frameStart)
+{
+    if (frameStart > content.size() || content.size() - frameStart < kWalFrameMetadataSize ||
+        !content.substr(frameStart).starts_with(kWalFrameMagic))
+        return false;
+
+    uint64_t payloadSize = 0;
+    const size_t payloadStart = frameStart + kWalFrameMagic.size() + sizeof(payloadSize);
+    if (!readValue(content, frameStart + kWalFrameMagic.size(), payloadSize) ||
+        payloadSize > content.size() - frameStart - kWalFrameMetadataSize)
+        return false;
+
+    const size_t payloadEnd = payloadStart + static_cast<size_t>(payloadSize);
+    uint32_t storedChecksum = 0;
+    return readValue(content, payloadEnd, storedChecksum) &&
+           content.substr(payloadEnd + sizeof(storedChecksum)).starts_with(kWalCommitMagic) &&
+           crc32(content.substr(payloadStart, payloadSize)) == storedChecksum;
+}
+
+bool hasValidFrameAfter(const std::string_view content, size_t searchPosition)
+{
+    while ((searchPosition = content.find(kWalFrameMagic, searchPosition)) != std::string_view::npos)
+    {
+        if (validFrameAt(content, searchPosition))
+            return true;
+        ++searchPosition;
+    }
+    return false;
+}
+
+class WALBatchParser
+{
+  public:
+    explicit WALBatchParser(const std::string_view content) : content_(content) {}
+
+    std::vector<std::pair<std::string, Entry>> parse()
+    {
+        std::vector<std::pair<std::string, Entry>> records;
+        const uint64_t recordCount = readLength();
+        consume(',');
+        for (uint64_t recordIndex = 0; recordIndex < recordCount; ++recordIndex)
+            records.push_back(readRecord());
+
+        if (position_ != content_.size())
+            throw std::runtime_error("Corrupt WAL batch length");
+        return records;
+    }
+
+  private:
+    std::pair<std::string, Entry> readRecord()
+    {
+        const std::string_view operation = readField(1);
+        consume(',');
+        if (operation != "D" && operation != "P")
+            throw std::runtime_error("Corrupt WAL record operation");
+
+        const uint64_t sequence = readLength();
+        consume(',');
+        const std::string_view key = readLengthPrefixedField('=');
+        const std::string_view value = readLengthPrefixedField('\n');
+
+        const Type type = operation == "P" ? Type::VALUE : Type::TOMBSTONE;
+        return std::pair{std::string(key), Entry{type, sequence, std::string(value)}};
+    }
+
+    uint64_t readLength()
+    {
+        const size_t begin = position_;
+        while (position_ < content_.size() && std::isdigit(static_cast<unsigned char>(content_[position_])))
+            ++position_;
+
+        if (begin == position_)
+            throw std::runtime_error("Corrupt WAL record length");
+        if (position_ == content_.size())
+            throw std::runtime_error("Corrupt WAL record length");
+
+        try
+        {
+            return std::stoull(std::string(content_.substr(begin, position_ - begin)));
+        }
+        catch (const std::exception&)
+        {
+            throw std::runtime_error("Corrupt WAL record length");
+        }
+    }
+
+    void consume(const char expected)
+    {
+        if (position_ >= content_.size() || content_[position_] != expected)
+            throw std::runtime_error("Corrupt WAL record delimiter");
+
+        ++position_;
+    }
+
+    std::string_view readField(const uint64_t length)
+    {
+        if (length > content_.size() - position_)
+            throw std::runtime_error("Corrupt WAL record length");
+
+        const std::string_view field = content_.substr(position_, static_cast<size_t>(length));
+        position_ += static_cast<size_t>(length);
+        return field;
+    }
+
+    std::string_view readLengthPrefixedField(const char terminator)
+    {
+        const uint64_t length = readLength();
+        consume(',');
+        const std::string_view field = readField(length);
+        consume(terminator);
+        return field;
+    }
+
+    std::string_view content_;
+    size_t position_ = 0;
+};
+
 class WALParser
 {
   public:
@@ -48,102 +201,46 @@ class WALParser
         std::vector<std::pair<std::string, Entry>> records;
         while (position_ < content_.size())
         {
+            const size_t frameStart = position_;
+            if (content_.size() - frameStart < kWalFrameMetadataSize ||
+                !content_.substr(frameStart).starts_with(kWalFrameMagic))
+                return incompleteTailOrCorruption(frameStart, std::move(records));
+
+            uint64_t payloadSize = 0;
+            if (!readValue(content_, frameStart + kWalFrameMagic.size(), payloadSize) ||
+                payloadSize > content_.size() - frameStart - kWalFrameMetadataSize)
+                return incompleteTailOrCorruption(frameStart, std::move(records));
+
+            const size_t payloadStart = frameStart + kWalFrameMagic.size() + sizeof(payloadSize);
+            const size_t payloadEnd = payloadStart + static_cast<size_t>(payloadSize);
+            uint32_t storedChecksum = 0;
+            if (!readValue(content_, payloadEnd, storedChecksum) ||
+                !content_.substr(payloadEnd + sizeof(storedChecksum)).starts_with(kWalCommitMagic))
+                return incompleteTailOrCorruption(frameStart, std::move(records));
+
+            const std::string_view payload = content_.substr(payloadStart, static_cast<size_t>(payloadSize));
+            if (crc32(payload) != storedChecksum)
+                throw std::runtime_error("Corrupt WAL frame checksum");
+
+            auto batchRecords = WALBatchParser(payload).parse();
+            records.insert(records.end(), std::make_move_iterator(batchRecords.begin()),
+                           std::make_move_iterator(batchRecords.end()));
+
+            position_ = payloadEnd + sizeof(storedChecksum) + kWalCommitMagic.size();
             lastGoodOffset = position_;
-            uint64_t recordCount = 0;
-            if (!readLength(recordCount) || !consume(','))
-                return records;
-
-            std::vector<std::pair<std::string, Entry>> batchRecords;
-            for (uint64_t recordIndex = 0; recordIndex < recordCount; ++recordIndex)
-            {
-                const auto record = readRecord();
-                if (!record)
-                    return records;
-                batchRecords.push_back(*record);
-            }
-            records.insert(records.end(), batchRecords.begin(), batchRecords.end());
         }
-
-        lastGoodOffset = position_;
         return records;
     }
 
   private:
-    std::optional<std::pair<std::string, Entry>> readRecord()
+    std::vector<std::pair<std::string, Entry>>
+    incompleteTailOrCorruption(const size_t frameStart, std::vector<std::pair<std::string, Entry>> records) const
     {
-        std::string_view operation;
-        if (!readField(1, operation) || !consume(','))
-            return std::nullopt;
-        if (operation != "D" && operation != "P")
-            throw std::runtime_error("Corrupt WAL record operation");
-
-        uint64_t sequence = 0;
-        if (!readLength(sequence) || !consume(','))
-            return std::nullopt;
-
-        std::string_view key;
-        if (!readLengthPrefixedField(key, '='))
-            return std::nullopt;
-
-        std::string_view value;
-        if (!readLengthPrefixedField(value, '\n'))
-            return std::nullopt;
-
-        const Type type = operation == "P" ? Type::VALUE : Type::TOMBSTONE;
-        return std::pair{std::string(key), Entry{type, sequence, std::string(value)}};
-    }
-
-    bool readLength(uint64_t& length)
-    {
-        const size_t begin = position_;
-        while (position_ < content_.size() && std::isdigit(static_cast<unsigned char>(content_[position_])))
-            ++position_;
-
-        if (begin == position_)
-        {
-            if (position_ != content_.size())
-                throw std::runtime_error("Corrupt WAL record length");
-            return false;
-        }
-        if (position_ == content_.size())
-            return false;
-
-        try
-        {
-            length = std::stoull(std::string(content_.substr(begin, position_ - begin)));
-        }
-        catch (const std::out_of_range&)
-        {
-            return false;
-        }
-        return true;
-    }
-
-    bool consume(const char expected)
-    {
-        if (position_ >= content_.size())
-            return false;
-        if (content_[position_] != expected)
-            throw std::runtime_error("Corrupt WAL record delimiter");
-
-        ++position_;
-        return true;
-    }
-
-    bool readField(const size_t length, std::string_view& field)
-    {
-        field = content_.substr(position_, length);
-        if (field.size() != length)
-            return false;
-
-        position_ += length;
-        return true;
-    }
-
-    bool readLengthPrefixedField(std::string_view& field, const char terminator)
-    {
-        uint64_t length = 0;
-        return readLength(length) && consume(',') && readField(length, field) && consume(terminator);
+        const bool hasCommitMarker =
+            content_.size() - frameStart >= kWalFrameMetadataSize && content_.ends_with(kWalCommitMagic);
+        if (hasCommitMarker || hasValidFrameAfter(content_, frameStart + 1))
+            throw std::runtime_error("Corrupt WAL frame before a committed batch");
+        return records;
     }
 
     std::string_view content_;
@@ -185,13 +282,13 @@ bool MemTable::applyBatch(const std::vector<Record>& ops)
 {
     if (ops.empty())
         return true;
-    std::string content = std::to_string(ops.size()) + ",";
+    std::string payload = std::to_string(ops.size()) + ",";
     for (const auto& record : ops)
-        content += encodeWALRecord(record);
+        payload += encodeWALRecord(record);
 
     try
     {
-        walWriter_.write(content);
+        walWriter_.write(encodeWALFrame(payload));
     }
     catch (const std::system_error& error)
     {
